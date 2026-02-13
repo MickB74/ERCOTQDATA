@@ -532,6 +532,13 @@ _sync_sidebar_filter_state_from_chart_filters(chart_filters)
 with st.sidebar:
     st.header("Filters")
 
+    chart_key_by_sidebar_filter = {
+        "fuel": "fuel",
+        "technology": "technology",
+        "developer": "developer",
+        "reporting_zone": "zone",
+    }
+
     filter_definitions = [
         ("Status", "Statuses", status_col, "status"),
         ("Fuel", "Fuels", fuel_display_col, "fuel"),
@@ -591,6 +598,16 @@ with st.sidebar:
             else:
                 # "All" effectively selected, so no filter is applied.
                 pass
+            chart_key = chart_key_by_sidebar_filter.get(filter_key)
+            if chart_key:
+                if selected:
+                    chart_filters[chart_key] = sorted(set(selected))
+                else:
+                    chart_filters.pop(chart_key, None)
+        else:
+            chart_key = chart_key_by_sidebar_filter.get(filter_key)
+            if chart_key:
+                chart_filters.pop(chart_key, None)
 
     if capacity_col and capacity_col in filtered_df.columns:
         numeric_capacity = pd.to_numeric(filtered_df[capacity_col], errors="coerce")
