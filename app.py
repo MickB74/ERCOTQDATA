@@ -86,7 +86,7 @@ filtered_df = current_df.copy()
 with st.sidebar:
     st.header("Filters")
 
-    for label, semantic_key in [("Status", "status"), ("Fuel / Technology", "fuel"), ("County", "county")]:
+    for label, semantic_key in [("Status", "status"), ("Fuel / Technology", "fuel"), ("Developer", "developer"), ("County", "county")]:
         column = semantic.get(semantic_key)
         if not column or column not in filtered_df.columns:
             continue
