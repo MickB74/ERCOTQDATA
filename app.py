@@ -852,6 +852,104 @@ def _render_operating_assets_view() -> None:
     )
 
 
+def _extract_named_large_load_candidates(snapshot_df: pd.DataFrame) -> pd.DataFrame:
+    if snapshot_df is None or snapshot_df.empty:
+        return pd.DataFrame()
+
+    df = snapshot_df.copy()
+    semantic = infer_semantic_columns(df)
+    capacity_col = semantic.get("capacity_mw")
+    project_col = semantic.get("project_name")
+    developer_col = semantic.get("developer")
+    status_col = semantic.get("status")
+    zone_col = semantic.get("reporting_zone")
+    county_col = semantic.get("county")
+    queue_id_col = semantic.get("queue_id")
+    source_sheet_col = "source_sheet" if "source_sheet" in df.columns else None
+    poi_col = "poi_location" if "poi_location" in df.columns else None
+
+    if not capacity_col or capacity_col not in df.columns:
+        return pd.DataFrame()
+    if not project_col or project_col not in df.columns:
+        return pd.DataFrame()
+
+    if source_sheet_col:
+        source_text = df[source_sheet_col].astype("string").str.lower()
+        detail_mask = source_text.str.contains("project details - large gen|project details - small gen", na=False)
+        if detail_mask.any():
+            df = df[detail_mask].copy()
+
+    df[capacity_col] = pd.to_numeric(df[capacity_col], errors="coerce")
+    df = df[df[capacity_col].fillna(0) > 0].copy()
+    if df.empty:
+        return pd.DataFrame()
+
+    company_terms = [
+        "meta",
+        "google",
+        "alphabet",
+        "microsoft",
+        "amazon",
+        "aws",
+        "oracle",
+        "apple",
+        "xai",
+        "openai",
+        "digital realty",
+        "equinix",
+        "qts",
+        "switch",
+        "vantage",
+        "cyrusone",
+    ]
+    generic_terms = ["data center", "datacenter", "office", "campus"]
+
+    rows: list[dict[str, Any]] = []
+    for _, row in df.iterrows():
+        project_text = str(row.get(project_col, "") or "")
+        developer_text = str(row.get(developer_col, "") or "") if developer_col else ""
+        poi_text = str(row.get(poi_col, "") or "") if poi_col else ""
+
+        project_lower = project_text.lower()
+        developer_lower = developer_text.lower()
+        poi_lower = poi_text.lower()
+        reasons: list[str] = []
+
+        for term in company_terms:
+            if term in project_lower or term in developer_lower:
+                reasons.append(term)
+        for term in generic_terms:
+            if term in project_lower or term in developer_lower or term in poi_lower:
+                reasons.append(term)
+        if re.search(r"\bload\b", project_lower) or re.search(r"\bload\b", developer_lower):
+            reasons.append("load")
+
+        if not reasons:
+            continue
+
+        rows.append(
+            {
+                "queue_id": row.get(queue_id_col) if queue_id_col else None,
+                "project_name": row.get(project_col),
+                "interconnecting_entity": row.get(developer_col) if developer_col else None,
+                "status": row.get(status_col) if status_col else None,
+                "reporting_zone": row.get(zone_col) if zone_col else None,
+                "county": row.get(county_col) if county_col else None,
+                "capacity_mw": row.get(capacity_col),
+                "source_sheet": row.get(source_sheet_col) if source_sheet_col else None,
+                "match_terms": ", ".join(sorted(set(reasons))),
+            }
+        )
+
+    if not rows:
+        return pd.DataFrame()
+
+    result = pd.DataFrame(rows)
+    result["capacity_mw"] = pd.to_numeric(result["capacity_mw"], errors="coerce")
+    result = result.sort_values("capacity_mw", ascending=False, na_position="last")
+    return result.reset_index(drop=True)
+
+
 def _render_large_load_requests_view() -> None:
     st.subheader("Large Load Requests (Data Centers / Offices)")
     st.caption("Source: ERCOT Monthly Operational Overview files posted on ERCOT Board pages.")
@@ -1013,6 +1111,73 @@ def _render_large_load_requests_view() -> None:
         label="Download Large Load Trend (CSV)",
         data=history_df[display_columns].to_csv(index=False).encode("utf-8"),
         file_name="ercot_large_load_trend.csv",
+        mime="text/csv",
+    )
+
+    snapshot_df, snapshot_meta = load_latest_snapshot()
+    st.subheader("Named Request Candidates (Project-Level)")
+    st.caption(
+        "From latest ERCOT GIS project details. This surfaces rows that explicitly mention data centers/offices/load "
+        "or tracked company names in project/entity text."
+    )
+    if snapshot_df is None or snapshot_df.empty:
+        st.info("No GIS snapshot available. Use the Interconnection Queue tab and refresh data first.")
+        return
+
+    named_df = _extract_named_large_load_candidates(snapshot_df)
+    if named_df.empty:
+        st.info(
+            "No named load-request candidates were detected in the latest GIS snapshot. "
+            "ERCOT public large-load materials are often aggregate and may not include company-level rows."
+        )
+        return
+
+    named_metric_cols = st.columns(3)
+    named_metric_cols[0].metric("Named Candidates", f"{len(named_df):,}")
+    named_metric_cols[1].metric(
+        "Candidate MW",
+        f"{float(pd.to_numeric(named_df['capacity_mw'], errors='coerce').sum(skipna=True)):,.0f}",
+    )
+    named_metric_cols[2].metric(
+        "Snapshot ID",
+        str((snapshot_meta or {}).get("snapshot_id", "n/a")),
+    )
+
+    tracked_companies = ["Meta", "Google", "Microsoft", "Amazon/AWS", "Oracle", "Apple", "OpenAI", "xAI"]
+    company_patterns = {
+        "Meta": r"\bmeta\b",
+        "Google": r"\bgoogle\b|\balphabet\b",
+        "Microsoft": r"\bmicrosoft\b",
+        "Amazon/AWS": r"\bamazon\b|\baws\b",
+        "Oracle": r"\boracle\b",
+        "Apple": r"\bapple\b",
+        "OpenAI": r"\bopenai\b",
+        "xAI": r"\bxai\b",
+    }
+    company_rows: list[dict[str, Any]] = []
+    combined_text = (
+        named_df["project_name"].astype("string").fillna("")
+        + " "
+        + named_df["interconnecting_entity"].astype("string").fillna("")
+    ).str.lower()
+    for company in tracked_companies:
+        pattern = company_patterns[company]
+        company_mask = combined_text.str.contains(pattern, regex=True, na=False)
+        company_rows.append(
+            {
+                "company": company,
+                "projects": int(company_mask.sum()),
+                "mw": float(pd.to_numeric(named_df.loc[company_mask, "capacity_mw"], errors="coerce").sum(skipna=True)),
+            }
+        )
+    company_df = pd.DataFrame(company_rows)
+    st.dataframe(company_df, use_container_width=True, hide_index=True)
+
+    st.dataframe(named_df, use_container_width=True, height=360)
+    st.download_button(
+        label="Download Named Request Candidates (CSV)",
+        data=named_df.to_csv(index=False).encode("utf-8"),
+        file_name="ercot_named_large_load_candidates.csv",
         mime="text/csv",
     )
 
