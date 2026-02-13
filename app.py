@@ -101,9 +101,15 @@ with st.sidebar:
         if not options:
             continue
 
-        selected = st.multiselect(label, options=options, default=options)
-        if selected:
-            filtered_df = filtered_df[filtered_df[column].astype(str).isin(selected)]
+        # Add "Select All" logic
+        select_all = st.checkbox(f"All {label}", value=True, key=f"all_{semantic_key}")
+        if not select_all:
+            selected = st.multiselect(f"Select {label}", options=options, default=options)
+            if selected:
+                filtered_df = filtered_df[filtered_df[column].astype(str).isin(selected)]
+            else:
+                # If nothing selected and not "Select All", show nothing
+                filtered_df = filtered_df[filtered_df[column].isna()]
 
     capacity_col = semantic.get("capacity_mw")
     if capacity_col and capacity_col in filtered_df.columns:
