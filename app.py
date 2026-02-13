@@ -581,6 +581,8 @@ with st.sidebar:
 
         # Add "Select All" logic
         select_all = st.checkbox(f"All {plural_label}", value=True, key=f"all_{filter_key}")
+        chart_key = chart_key_by_sidebar_filter.get(filter_key)
+        is_chart_dimension = chart_key is not None
         if not select_all:
             selected = st.multiselect(
                 f"Select {plural_label}",
@@ -589,7 +591,8 @@ with st.sidebar:
                 key=select_key,
             )
             if selected and set(selected) != set(options):
-                filtered_df = filtered_df[filtered_df[column].astype(str).isin(selected)]
+                if not is_chart_dimension:
+                    filtered_df = filtered_df[filtered_df[column].astype(str).isin(selected)]
                 active_filters.append(label)
             elif not selected:
                 # If nothing selected and not "Select All", show nothing
@@ -598,14 +601,12 @@ with st.sidebar:
             else:
                 # "All" effectively selected, so no filter is applied.
                 pass
-            chart_key = chart_key_by_sidebar_filter.get(filter_key)
             if chart_key:
-                if selected:
+                if selected and set(selected) != set(options):
                     chart_filters[chart_key] = sorted(set(selected))
                 else:
                     chart_filters.pop(chart_key, None)
         else:
-            chart_key = chart_key_by_sidebar_filter.get(filter_key)
             if chart_key:
                 chart_filters.pop(chart_key, None)
 
