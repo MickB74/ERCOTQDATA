@@ -1,15 +1,17 @@
-from __future__ import annotations
-
-from datetime import datetime
-
+import streamlit as st
 import pandas as pd
 import plotly.express as px
-import streamlit as st
+from datetime import datetime
 
-from ercot_queue.config import MAX_CHANGE_SAMPLE_ROWS
-from ercot_queue.diffing import calculate_diff
-from ercot_queue.fetcher import fetch_latest_ercot_queue
-from ercot_queue.processing import infer_semantic_columns, prepare_queue_dataframe
+# Standardize ercot_queue package access
+try:
+    from ercot_queue.config import MAX_CHANGE_SAMPLE_ROWS
+    from ercot_queue.diffing import calculate_diff
+    from ercot_queue.fetcher import fetch_latest_ercot_queue
+    from ercot_queue.processing import infer_semantic_columns, prepare_queue_dataframe
+except ImportError as exc:
+    st.error(f"Critical Package Error: {exc}")
+    st.stop()
 from ercot_queue.store import (
     ensure_data_dirs,
     load_change_report,
@@ -420,6 +422,10 @@ with validation_col_1:
     ).strip()
 with validation_col_2:
     run_validation = st.button("Run External Validation", use_container_width=True)
+    if st.button("Clear Validation Results", use_container_width=True):
+        if "external_validation" in st.session_state:
+            del st.session_state["external_validation"]
+        st.rerun()
 
 if run_validation:
     try:
@@ -447,17 +453,18 @@ if run_validation:
         st.error(f"External validation failed: {exc}")
 
 validation_state = st.session_state.get("external_validation")
-if validation_state:
-    summary = validation_state["result"]["summary"]
-    source_meta = validation_state["source_meta"]
-
-    val_res = validation_state["result"]
+if isinstance(validation_state, dict):
+    val_res = validation_state.get("result", {})
+    summary = val_res.get("summary", {})
+    source_meta = validation_state.get("source_meta", {})
     
-    st.caption(
-        f"Last validation run: {validation_state['ran_at_utc']} UTC | "
-        f"Parser: {source_meta.get('parser', 'unknown')} | "
-        f"Source: {source_meta.get('source_url', validation_url)}"
-    )
+    # Only show if we have a valid summary structure
+    if isinstance(summary, dict) and summary:
+        st.caption(
+            f"Last validation run: {validation_state.get('ran_at_utc', 'unknown')} UTC | "
+            f"Parser: {source_meta.get('parser', 'unknown')} | "
+            f"Source: {source_meta.get('source_url', validation_url)}"
+        )
 
     # Collect all unique statuses for filtering
     all_statuses = set()
