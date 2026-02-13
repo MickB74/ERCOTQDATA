@@ -374,7 +374,7 @@ capacity_col = semantic.get("capacity_mw")
 filtered_capacity_mw = None
 if capacity_col and capacity_col in filtered_df.columns:
     filtered_capacity_mw = float(pd.to_numeric(filtered_df[capacity_col], errors="coerce").sum(skipna=True))
-if selected_scope == "Combined (Large + Small)" and official_under_study_mw is not None:
+if official_under_study_mw is not None:
     metric_cols[2].metric("ERCOT Under Study (MW)", f"{official_under_study_mw:,.0f}")
 elif filtered_capacity_mw is not None:
     metric_cols[2].metric("Filtered Capacity (MW)", f"{filtered_capacity_mw:,.0f}")
@@ -392,7 +392,7 @@ else:
 if scope_notice:
     st.caption(scope_notice)
 
-if selected_scope == "Combined (Large + Small)" and official_under_study_mw is not None:
+if official_under_study_mw is not None:
     if detail_project_capacity_mw is not None:
         difference_mw = official_under_study_mw - detail_project_capacity_mw
         st.caption(
@@ -411,6 +411,8 @@ if selected_scope == "Combined (Large + Small)" and official_under_study_mw is n
             f"ERCOT Summary total under study: {official_under_study_mw:,.2f} MW "
             "(from the Summary tab)."
         )
+    if selected_scope != "Combined (Large + Small)":
+        st.caption("Scope filters adjust project-level views, while ERCOT Under Study remains the full system total.")
 
 if current_meta:
     st.caption(
