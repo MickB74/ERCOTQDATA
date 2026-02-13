@@ -296,13 +296,13 @@ def _extract_operational_from_capacity_sheet(workbook: Any) -> float | None:
     if target_sheet is None:
         return None
 
-    operational_labels = {
-        "thermal",
-        "renewable, intermittent [6]",
-        "renewable, other",
-        "energy storage",
-        "dc tie net imports",
-    }
+    category_patterns = [
+        re.compile(r"^thermal\b", flags=re.IGNORECASE),
+        re.compile(r"^renewable,\s*intermittent\b", flags=re.IGNORECASE),
+        re.compile(r"^renewable,\s*other\b", flags=re.IGNORECASE),
+        re.compile(r"^energy\s+storage\b", flags=re.IGNORECASE),
+        re.compile(r"^dc\s*tie\s*net\s*imports\b", flags=re.IGNORECASE),
+    ]
 
     in_operational_block = False
     total_operational = 0.0
@@ -328,7 +328,10 @@ def _extract_operational_from_capacity_sheet(workbook: Any) -> float | None:
             break
         if not in_operational_block:
             continue
-        if first_text not in operational_labels:
+        normalized_first = re.sub(r"\[[^\]]*\]", "", first_text).strip()
+        if "total" in normalized_first:
+            continue
+        if not any(pattern.search(normalized_first) for pattern in category_patterns):
             continue
 
         numeric_values = [

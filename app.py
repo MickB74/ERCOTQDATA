@@ -464,6 +464,35 @@ def _prepare_operating_assets_dataframe(raw_df: pd.DataFrame) -> pd.DataFrame:
     return df.reset_index(drop=True)
 
 
+def _derive_operational_installed_capacity_mw(
+    df: pd.DataFrame,
+    capacity_col: str | None,
+    status_col: str | None,
+    asset_name_col: str | None,
+) -> float | None:
+    if df.empty or not capacity_col or capacity_col not in df.columns:
+        return None
+
+    capacity = pd.to_numeric(df[capacity_col], errors="coerce")
+    mask = capacity.notna() & (capacity > 0)
+    if not mask.any():
+        return None
+
+    if status_col and status_col in df.columns:
+        status_text = df[status_col].astype("string").str.lower()
+        operating_mask = status_text.str.contains("operat", na=False)
+        if operating_mask.any():
+            mask = mask & operating_mask
+
+    if asset_name_col and asset_name_col in df.columns:
+        name_text = df[asset_name_col].astype("string").str.lower()
+        summary_mask = name_text.str.contains(r"\btotal\b|operational resources|planned resources", na=False, regex=True)
+        mask = mask & ~summary_mask
+
+    total = float(capacity[mask].sum(skipna=True))
+    return total if total > 0 else None
+
+
 def _render_operating_assets_view() -> None:
     st.subheader("Operating Assets (ERCOT MORA)")
     st.caption("Source: ERCOT Resource Adequacy page (latest MORA workbook).")
@@ -520,6 +549,49 @@ def _render_operating_assets_view() -> None:
 
     metric_cols = st.columns(3)
     official_operational = assets_meta.get("operational_installed_capacity_mw")
+    operational_capacity_source = "ercot_summary"
+    if not isinstance(official_operational, (int, float)):
+        retry_key = f"operating_assets_retry_done::{operating_index_url}"
+        if not st.session_state.get(retry_key, False):
+            st.session_state[retry_key] = True
+            try:
+                _cached_fetch_operating_assets.clear()
+                retry_df, retry_meta = _cached_fetch_operating_assets(operating_index_url)
+                if retry_df is not None and not retry_df.empty:
+                    assets_df = _prepare_operating_assets_dataframe(retry_df)
+                    filtered_assets = assets_df.copy()
+                    semantic = infer_semantic_columns(assets_df)
+                    status_col = semantic.get("status")
+                    fuel_col = semantic.get("fuel")
+                    zone_col = semantic.get("reporting_zone")
+                    asset_name_col = semantic.get("project_name")
+                    capacity_col = semantic.get("capacity_mw")
+                    if not capacity_col:
+                        capacity_col = _first_matching_column(
+                            list(assets_df.columns),
+                            [r"available.*mw", r"max.*mw", r"\bmw\b"],
+                        )
+                    if not asset_name_col:
+                        asset_name_col = _first_matching_column(
+                            list(assets_df.columns),
+                            [r"resource.*name", r"unit.*name", r"\bname\b"],
+                        )
+                assets_meta = retry_meta
+                official_operational = assets_meta.get("operational_installed_capacity_mw")
+            except Exception:
+                pass
+
+    if not isinstance(official_operational, (int, float)):
+        derived_operational = _derive_operational_installed_capacity_mw(
+            assets_df,
+            capacity_col,
+            status_col,
+            asset_name_col,
+        )
+        if isinstance(derived_operational, (int, float)):
+            official_operational = float(derived_operational)
+            operational_capacity_source = "derived_rows"
+
     if isinstance(official_operational, (int, float)):
         metric_cols[0].metric("Operational Installed Capacity (MW)", f"{float(official_operational):,.0f}")
     else:
@@ -540,7 +612,12 @@ def _render_operating_assets_view() -> None:
                 "ERCOT official total operational installed capacity: "
                 f"{float(official_operational):,.0f} MW."
             )
-            st.caption("This value comes from ERCOT's MORA summary and does not change with row filters.")
+            if operational_capacity_source == "ercot_summary":
+                st.caption("This value comes from ERCOT's MORA summary and does not change with row filters.")
+            else:
+                st.caption(
+                    "Summary total was unavailable in this workbook, so this value is derived from operating detail rows."
+                )
 
     chart_col_1, chart_col_2 = st.columns(2)
     if fuel_col and fuel_col in filtered_assets.columns:
