@@ -110,7 +110,13 @@ capacity_col = semantic.get("capacity_mw")
 with st.sidebar:
     st.header("Filters")
 
-    for label, semantic_key in [("Status", "status"), ("Fuel / Technology", "fuel"), ("Developer", "developer"), ("County", "county")]:
+    for label, semantic_key in [
+        ("Status", "status"),
+        ("Fuel / Technology", "fuel"),
+        ("Reporting Zone", "reporting_zone"),
+        ("Developer", "developer"),
+        ("County", "county"),
+    ]:
         column = semantic.get(semantic_key)
         if not column or column not in filtered_df.columns:
             continue
