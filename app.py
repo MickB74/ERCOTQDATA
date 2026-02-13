@@ -278,6 +278,36 @@ else:
     st.info("No developer column detected for developer analysis.")
 
 
+st.subheader("Regional Analysis")
+zone_col = semantic.get("reporting_zone")
+fuel_col = semantic.get("fuel")
+
+if zone_col and zone_col in filtered_df.columns:
+    if capacity_col and capacity_col in filtered_df.columns:
+        # Prepare data for stacked bars
+        zone_fuel_df = (
+            filtered_df.groupby([zone_col, fuel_col or "Unknown"])[capacity_col]
+            .sum()
+            .reset_index()
+            .sort_values(capacity_col, ascending=False)
+        )
+
+        zone_fig = px.bar(
+            zone_fuel_df,
+            x=zone_col,
+            y=capacity_col,
+            color=fuel_col or "Unknown",
+            title="Capacity (MW) by Reporting Zone and Technology",
+            labels={capacity_col: "Total MW", zone_col: "Reporting Zone", fuel_col or "Unknown": "Technology"},
+            barmode="stack",
+        )
+        st.plotly_chart(zone_fig, use_container_width=True)
+    else:
+        st.info("Capacity (MW) column missing for regional analysis.")
+else:
+    st.info("No reporting zone column detected for regional analysis.")
+
+
 st.subheader("Filtered Queue Records")
 st.dataframe(filtered_df, use_container_width=True, height=420)
 st.download_button(

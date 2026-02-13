@@ -56,6 +56,7 @@ def infer_semantic_columns(df: pd.DataFrame) -> dict[str, str | None]:
             ],
         ),
         "developer": _match_first(columns, [r"interconnecting.*entity", r"developer", r"owner", r"entity"]),
+        "reporting_zone": _match_first(columns, [r"reporting.*zone", r"zone", r"region"]),
         "project_name": _match_first(columns, [r"project", r"name"]),
         "queue_id": _match_first(columns, [r"queue.*(id|number)", r"project.*id", r"^id$"]),
     }
