@@ -19,6 +19,7 @@ def prepare_queue_dataframe(raw_df: pd.DataFrame) -> pd.DataFrame:
     df = _clean_string_values(df)
     df = _infer_numeric_columns(df)
     df = _infer_date_columns(df)
+    df = _remap_storage_fuel(df)
 
     df["record_key"] = build_record_key(df)
     df = df.drop_duplicates(subset=["record_key"], keep="last").reset_index(drop=True)
@@ -142,6 +143,36 @@ def _match_first(columns: list[str], patterns: list[str]) -> str | None:
             if regex.search(column):
                 return column
     return None
+
+
+def _remap_storage_fuel(df: pd.DataFrame) -> pd.DataFrame:
+    """Remaps 'Other' fuel type to 'Battery / Storage' if keywords are found."""
+    semantic = infer_semantic_columns(df)
+    fuel_col = semantic.get("fuel")
+    if not fuel_col or fuel_col not in df.columns:
+        return df
+
+    # Keywords that indicate storage/battery
+    storage_pattern = r"(?i)battery|storage|esr|bss|ess"
+
+    # Identify potential content columns to check for keywords
+    check_cols = [
+        col
+        for col in df.columns
+        if re.search(r"technology|generation|type|project|name", col, re.IGNORECASE)
+    ]
+
+    mask_other = df[fuel_col].astype(str).str.contains(r"(?i)^other$", na=False)
+
+    def _is_storage(row: pd.Series) -> bool:
+        combined_text = " ".join(str(row.get(col, "")) for col in check_cols)
+        return bool(re.search(storage_pattern, combined_text))
+
+    # Only apply to rows where fuel is 'Other'
+    df.loc[mask_other, "is_storage_detected"] = df[mask_other].apply(_is_storage, axis=1)
+    df.loc[df["is_storage_detected"] == True, fuel_col] = "Battery / Storage"
+
+    return df.drop(columns=["is_storage_detected"], errors="ignore")
 
 
 def _to_key_string(value: Any) -> str:
