@@ -111,13 +111,16 @@ with st.sidebar:
         if numeric_capacity.notna().any():
             minimum = float(numeric_capacity.min())
             maximum = float(numeric_capacity.max())
-            low, high = st.slider(
-                "Capacity (MW)",
-                min_value=minimum,
-                max_value=maximum,
-                value=(minimum, maximum),
-            )
-            filtered_df = filtered_df[numeric_capacity.between(low, high, inclusive="both")]
+            if minimum < maximum:
+                low, high = st.slider(
+                    "Capacity (MW)",
+                    min_value=minimum,
+                    max_value=maximum,
+                    value=(minimum, maximum),
+                )
+                filtered_df = filtered_df[numeric_capacity.between(low, high, inclusive="both")]
+            else:
+                st.caption(f"Capacity: {minimum:,.0f} MW")
 
     cod_col = semantic.get("cod_date")
     if cod_col and cod_col in filtered_df.columns:
@@ -125,11 +128,14 @@ with st.sidebar:
         if cod_series.notna().any():
             min_date = cod_series.min().date()
             max_date = cod_series.max().date()
-            selected_dates = st.date_input("COD / In-Service Date", (min_date, max_date))
-            if isinstance(selected_dates, (tuple, list)) and len(selected_dates) == 2:
-                start_date, end_date = selected_dates
-                mask = cod_series.between(pd.Timestamp(start_date), pd.Timestamp(end_date), inclusive="both")
-                filtered_df = filtered_df[mask]
+            if min_date < max_date:
+                selected_dates = st.date_input("COD / In-Service Date", (min_date, max_date))
+                if isinstance(selected_dates, (tuple, list)) and len(selected_dates) == 2:
+                    start_date, end_date = selected_dates
+                    mask = cod_series.between(pd.Timestamp(start_date), pd.Timestamp(end_date), inclusive="both")
+                    filtered_df = filtered_df[mask]
+            else:
+                st.caption(f"COD Date: {min_date}")
 
 
 st.subheader("Current Snapshot")
