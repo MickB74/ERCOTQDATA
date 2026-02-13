@@ -102,6 +102,8 @@ def compare_local_to_external(
                     {
                         "queue_id": key,
                         "project_name": local_row.get("project_name") or external_row.get("project_name"),
+                        "local_status": local_row.get("status"),
+                        "external_status": external_row.get("status"),
                         "local_capacity_mw": float(local_capacity),
                         "external_capacity_mw": float(external_capacity),
                         "delta_mw": delta,

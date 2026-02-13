@@ -451,57 +451,102 @@ if validation_state:
     summary = validation_state["result"]["summary"]
     source_meta = validation_state["source_meta"]
 
+    val_res = validation_state["result"]
+    
     st.caption(
         f"Last validation run: {validation_state['ran_at_utc']} UTC | "
         f"Parser: {source_meta.get('parser', 'unknown')} | "
         f"Source: {source_meta.get('source_url', validation_url)}"
     )
 
-    st.markdown("##### Project Counts")
-    val_metrics_ids = st.columns(7)
-    val_metrics_ids[0].metric("Local IDs", f"{summary.get('local_queue_ids', 0):,}")
-    val_metrics_ids[1].metric("External IDs", f"{summary.get('external_queue_ids', 0):,}")
-    val_metrics_ids[2].metric("Matched IDs", f"{summary.get('matched_queue_ids', 0):,}")
-    val_metrics_ids[3].metric("Missing Local", f"{summary.get('missing_in_local', 0):,}")
-    val_metrics_ids[4].metric("Missing External", f"{summary.get('missing_in_external', 0):,}")
-    val_metrics_ids[5].metric("Status Mismatches", f"{summary.get('status_mismatches', 0):,}")
-    val_metrics_ids[6].metric("Capacity Mismatches", f"{summary.get('capacity_mismatches', 0):,}")
+    # Collect all unique statuses for filtering
+    all_statuses = set()
+    for df_key in ["missing_in_local", "missing_in_external", "status_mismatches", "capacity_mismatches"]:
+        df = val_res.get(df_key)
+        if isinstance(df, pd.DataFrame) and not df.empty:
+            for col in ["status", "local_status", "external_status"]:
+                if col in df.columns:
+                    all_statuses.update(df[col].dropna().unique())
+    
+    sorted_statuses = sorted(list(all_statuses))
+    
+    st.markdown("---")
+    val_filter_col1, val_filter_col2 = st.columns([1, 2])
+    with val_filter_col1:
+        st.write("**Filter Results by Status**")
+        select_all_val = st.checkbox("All Statuses", value=True, key="val_status_all")
+    with val_filter_col2:
+        if select_all_val:
+            selected_val_statuses = sorted_statuses
+            st.multiselect("Statuses", options=sorted_statuses, default=sorted_statuses, disabled=True, key="val_status_sel_all")
+        else:
+            selected_val_statuses = st.multiselect("Select Statuses", options=sorted_statuses, default=sorted_statuses, key="val_status_sel")
 
-    st.markdown("##### Total Capacity (MW)")
-    val_metrics_mw = st.columns(7)
-    val_metrics_mw[0].metric("Local MW", f"{summary.get('local_mw', 0):,.0f}")
-    val_metrics_mw[1].metric("External MW", f"{summary.get('external_mw', 0):,.0f}")
-    val_metrics_mw[2].metric("Matched MW", f"{summary.get('matched_mw', 0):,.0f}")
-    val_metrics_mw[3].metric("Missing Local MW", f"{summary.get('missing_in_local_mw', 0):,.0f}")
-    val_metrics_mw[4].metric("Missing External MW", f"{summary.get('missing_in_external_mw', 0):,.0f}")
-    val_metrics_mw[5].metric("Status Mismatch MW", f"{summary.get('status_mismatch_mw', 0):,.0f}")
-    val_metrics_mw[6].metric("Capacity Mismatch MW", f"{summary.get('capacity_mismatch_mw', 0):,.0f}")
+    # Filter DataFrames
+    def filter_val_df(df, statuses):
+        if df is None or df.empty:
+            return df
+        mask = pd.Series(False, index=df.index)
+        for col in ["status", "local_status", "external_status"]:
+            if col in df.columns:
+                mask |= df[col].isin(statuses)
+        return df[mask]
 
-    missing_in_local_df = validation_state["result"]["missing_in_local"]
-    missing_in_external_df = validation_state["result"]["missing_in_external"]
-    status_mismatch_df = validation_state["result"]["status_mismatches"]
-    capacity_mismatch_df = validation_state["result"]["capacity_mismatches"]
+    missing_in_local_df = filter_val_df(val_res["missing_in_local"], selected_val_statuses)
+    missing_in_external_df = filter_val_df(val_res["missing_in_external"], selected_val_statuses)
+    status_mismatch_df = filter_val_df(val_res["status_mismatches"], selected_val_statuses)
+    capacity_mismatch_df = filter_val_df(val_res["capacity_mismatches"], selected_val_statuses)
+
+    # Recalculate Summary for metrics (based on filtered DataFrames)
+    filtered_summary = {
+        "local_queue_ids": len(missing_in_external_df) + (summary.get("matched_queue_ids", 0) if select_all_val else 0), # This is approximate if not all matched are shown
+        "external_queue_ids": len(missing_in_local_df) + (summary.get("matched_queue_ids", 0) if select_all_val else 0),
+        "matched_queue_ids": summary.get("matched_queue_ids", 0) if select_all_val else "n/a",
+        "missing_in_local": len(missing_in_local_df),
+        "missing_in_external": len(missing_in_external_df),
+        "status_mismatches": len(status_mismatch_df),
+        "capacity_mismatches": len(capacity_mismatch_df),
+        "missing_in_local_mw": missing_in_local_df["capacity_mw"].sum() if "capacity_mw" in missing_in_local_df.columns else 0,
+        "missing_in_external_mw": missing_in_external_df["capacity_mw"].sum() if "capacity_mw" in missing_in_external_df.columns else 0,
+        "status_mismatch_mw": status_mismatch_df["local_capacity_mw"].sum() if "local_capacity_mw" in status_mismatch_df.columns else (status_mismatch_df["capacity_mw"].sum() if "capacity_mw" in status_mismatch_df.columns else 0),
+        "capacity_mismatch_mw": capacity_mismatch_df["local_capacity_mw"].sum() if "local_capacity_mw" in capacity_mismatch_df.columns else 0,
+    }
+    # Note: matched_mw and overall totals are hard to filter perfectly without re-running the comparison or having more data.
+    # We will focus on the mismatch metrics which are most relevant for filtering.
+
+    st.markdown("##### Filtered Mismatch Metrics")
+    val_metrics_ids = st.columns(4)
+    val_metrics_ids[0].metric("Missing Local", f"{filtered_summary['missing_in_local']:,}")
+    val_metrics_ids[1].metric("Missing External", f"{filtered_summary['missing_in_external']:,}")
+    val_metrics_ids[2].metric("Status Mismatches", f"{filtered_summary['status_mismatches']:,}")
+    val_metrics_ids[3].metric("Capacity Mismatches", f"{filtered_summary['capacity_mismatches']:,}")
+
+    val_metrics_mw = st.columns(4)
+    val_metrics_mw[0].metric("Missing Local MW", f"{filtered_summary['missing_in_local_mw']:,.0f}")
+    val_metrics_mw[1].metric("Missing External MW", f"{filtered_summary['missing_in_external_mw']:,.0f}")
+    val_metrics_mw[2].metric("Status Mismatch MW", f"{filtered_summary['status_mismatch_mw']:,.0f}")
+    val_metrics_mw[3].metric("Capacity Mismatch MW", f"{filtered_summary['capacity_mismatch_mw']:,.0f}")
 
     with st.expander("Queue IDs Missing In Local Snapshot", expanded=False):
-        if isinstance(missing_in_local_df, pd.DataFrame) and not missing_in_local_df.empty:
+        if not missing_in_local_df.empty:
             st.dataframe(missing_in_local_df, use_container_width=True)
         else:
-            st.write("No missing queue IDs in local snapshot.")
+            st.write("No missing queue IDs in local snapshot (for selected statuses).")
 
     with st.expander("Queue IDs Missing In External Source", expanded=False):
-        if isinstance(missing_in_external_df, pd.DataFrame) and not missing_in_external_df.empty:
+        if not missing_in_external_df.empty:
             st.dataframe(missing_in_external_df, use_container_width=True)
         else:
-            st.write("No missing queue IDs in external source.")
+            st.write("No missing queue IDs in external source (for selected statuses).")
 
     with st.expander("Status Mismatches", expanded=False):
-        if isinstance(status_mismatch_df, pd.DataFrame) and not status_mismatch_df.empty:
+        if not status_mismatch_df.empty:
             st.dataframe(status_mismatch_df, use_container_width=True)
         else:
-            st.write("No status mismatches detected.")
+            st.write("No status mismatches detected (for selected statuses).")
 
     with st.expander("Capacity Mismatches (MW)", expanded=False):
-        if isinstance(capacity_mismatch_df, pd.DataFrame) and not capacity_mismatch_df.empty:
+        if not capacity_mismatch_df.empty:
             st.dataframe(capacity_mismatch_df, use_container_width=True)
         else:
-            st.write("No capacity mismatches above tolerance.")
+            st.write("No capacity mismatches above tolerance (for selected statuses).")
