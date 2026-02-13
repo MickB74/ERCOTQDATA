@@ -665,35 +665,117 @@ if cod_col and cod_col in filtered_df.columns:
 
     if not cod_data.empty:
         cod_data["cod_month"] = cod_data[cod_col].dt.to_period("M").dt.to_timestamp()
+        cod_totals = (
+            cod_data.groupby("cod_month", dropna=False)
+            .size()
+            .reset_index(name="projects")
+            .sort_values("cod_month")
+        )
+
+        st.subheader("Totals by Expected COD")
         if capacity_col and capacity_col in cod_data.columns:
             cod_data[capacity_col] = pd.to_numeric(cod_data[capacity_col], errors="coerce")
-            timeline_df = (
+            cod_capacity = (
                 cod_data.groupby("cod_month", dropna=False)[capacity_col]
                 .sum(min_count=1)
                 .reset_index()
-                .sort_values("cod_month")
             )
-            timeline_df["cumulative_capacity_mw"] = timeline_df[capacity_col].fillna(0).cumsum()
+            cod_totals = cod_totals.merge(cod_capacity, on="cod_month", how="left")
+
+            cod_col_1, cod_col_2 = st.columns(2)
+            cod_mw_fig = px.bar(
+                cod_totals,
+                x="cod_month",
+                y=capacity_col,
+                title="Total Capacity by Expected COD (MW)",
+                labels={capacity_col: "MW", "cod_month": "Expected COD Month"},
+                hover_data={"projects": True},
+            )
+            cod_mw_fig.update_layout(clickmode="event+select")
+            cod_mw_event = cod_col_1.plotly_chart(
+                cod_mw_fig,
+                use_container_width=True,
+                key="expected_cod_mw_chart",
+                on_select="rerun",
+            )
+            cod_mw_selected_raw = _selected_values_from_event(cod_mw_event, "x")
+            cod_mw_selected = sorted(
+                {
+                    ts.strftime("%Y-%m-%d")
+                    for ts in pd.to_datetime(pd.Series(cod_mw_selected_raw), errors="coerce")
+                    if pd.notna(ts)
+                }
+            )
+            if _update_chart_filter("cod_month", cod_mw_selected):
+                st.rerun()
+
+            cod_count_fig = px.bar(
+                cod_totals,
+                x="cod_month",
+                y="projects",
+                title="Total Projects by Expected COD",
+                labels={"projects": "Projects", "cod_month": "Expected COD Month"},
+                hover_data={capacity_col: ":,.2f"},
+            )
+            cod_count_fig.update_layout(clickmode="event+select")
+            cod_count_event = cod_col_2.plotly_chart(
+                cod_count_fig,
+                use_container_width=True,
+                key="expected_cod_projects_chart",
+                on_select="rerun",
+            )
+            cod_count_selected_raw = _selected_values_from_event(cod_count_event, "x")
+            cod_count_selected = sorted(
+                {
+                    ts.strftime("%Y-%m-%d")
+                    for ts in pd.to_datetime(pd.Series(cod_count_selected_raw), errors="coerce")
+                    if pd.notna(ts)
+                }
+            )
+            if _update_chart_filter("cod_month", cod_count_selected):
+                st.rerun()
+
+            cod_totals["cumulative_capacity_mw"] = cod_totals[capacity_col].fillna(0).cumsum()
             timeline_fig = px.line(
-                timeline_df,
+                cod_totals,
                 x="cod_month",
                 y="cumulative_capacity_mw",
-                title="Cumulative Planned Capacity by COD",
+                title="Cumulative Planned Capacity by Expected COD",
             )
         else:
-            timeline_df = (
-                cod_data.groupby("cod_month", dropna=False)
-                .size()
-                .reset_index(name="projects")
-                .sort_values("cod_month")
+            cod_count_fig = px.bar(
+                cod_totals,
+                x="cod_month",
+                y="projects",
+                title="Total Projects by Expected COD",
+                labels={"projects": "Projects", "cod_month": "Expected COD Month"},
             )
-            timeline_df["cumulative_projects"] = timeline_df["projects"].cumsum()
+            cod_count_fig.update_layout(clickmode="event+select")
+            cod_count_event = st.plotly_chart(
+                cod_count_fig,
+                use_container_width=True,
+                key="expected_cod_projects_chart",
+                on_select="rerun",
+            )
+            cod_count_selected_raw = _selected_values_from_event(cod_count_event, "x")
+            cod_count_selected = sorted(
+                {
+                    ts.strftime("%Y-%m-%d")
+                    for ts in pd.to_datetime(pd.Series(cod_count_selected_raw), errors="coerce")
+                    if pd.notna(ts)
+                }
+            )
+            if _update_chart_filter("cod_month", cod_count_selected):
+                st.rerun()
+
+            cod_totals["cumulative_projects"] = cod_totals["projects"].cumsum()
             timeline_fig = px.line(
-                timeline_df,
+                cod_totals,
                 x="cod_month",
                 y="cumulative_projects",
-                title="Cumulative Projects by COD",
+                title="Cumulative Projects by Expected COD",
             )
+
         timeline_fig.update_layout(clickmode="event+select")
         timeline_event = st.plotly_chart(
             timeline_fig,
