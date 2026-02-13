@@ -220,17 +220,35 @@ def _read_table_bytes(content: bytes, source_name: str, content_type: str) -> pd
 
     if source_lower.endswith((".xls", ".xlsx")) or "excel" in content_type or "spreadsheet" in content_type:
         try:
-            xls = pd.ExcelFile(io.BytesIO(content))
+            xls_data = io.BytesIO(content)
+            xls = pd.ExcelFile(xls_data)
             sheet_dfs = []
             valid_sheets = []
             
             for sheet_name in xls.sheet_names:
-                df = pd.read_excel(xls, sheet_name=sheet_name)
-                # Skip very small sheets or metadata/summary sheets
-                if df.empty or len(df) < 2:
+                # Read the first 10 rows to find the header
+                sample_df = pd.read_excel(xls, sheet_name=sheet_name, nrows=10, header=None)
+                if sample_df.empty:
                     continue
                 
-                # Check for project-like columns
+                header_row_index = -1
+                for i, row in sample_df.iterrows():
+                    row_joined = " ".join(str(val).lower() for val in row.dropna())
+                    if any(term in row_joined for term in ["queue", "project", "gir", "inr", "record"]):
+                        header_row_index = i
+                        break
+                
+                if header_row_index != -1:
+                    # Found a potential header row, re-read from there
+                    df = pd.read_excel(xls, sheet_name=sheet_name, header=header_row_index)
+                else:
+                    # Try default read if no specific row found
+                    df = pd.read_excel(xls, sheet_name=sheet_name)
+                
+                if df.empty or len(df) < 1:
+                    continue
+                
+                # Double check columns for sanity
                 cols = [str(c).lower() for c in df.columns]
                 is_valid = any(
                     any(term in col for term in ["queue", "project", "gir", "inr"])
@@ -239,6 +257,8 @@ def _read_table_bytes(content: bytes, source_name: str, content_type: str) -> pd
                 
                 if is_valid:
                     valid_sheets.append(sheet_name)
+                    # Clean up columns - sometimes excel adds 'Unnamed' columns
+                    df = df.loc[:, ~df.columns.str.contains('^Unnamed', na=False)]
                     sheet_dfs.append(df)
             
             if not sheet_dfs:
@@ -252,9 +272,10 @@ def _read_table_bytes(content: bytes, source_name: str, content_type: str) -> pd
             return combined
             
         except Exception as exc:
-            # Fallback to single read if ExcelFile fails
+            # Fallback to single read if complex read fails
             try:
-                return pd.read_excel(io.BytesIO(content))
+                xls_data.seek(0)
+                return pd.read_excel(xls_data)
             except:
                 pass
 
