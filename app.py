@@ -32,6 +32,7 @@ FUEL_CODE_MAP = {
     "GAS": "Gas",
     "GEO": "Geothermal",
     "HYD": "Hydrogen",
+    "MWH": "Miscellaneous Wind Hybrid",
     "NUC": "Nuclear",
     "OIL": "Fuel oil",
     "OTH": "Other",
