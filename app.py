@@ -788,10 +788,27 @@ else:
 
 
 st.subheader("Filtered Queue Records")
-st.dataframe(filtered_df, use_container_width=True, height=420)
+queue_display_df = filtered_df
+queue_start_column: str | None = None
+for candidate in ("inr", "ginr", "gir"):
+    if candidate in filtered_df.columns:
+        queue_start_column = candidate
+        break
+
+if queue_start_column is None:
+    queue_id_col = semantic.get("queue_id")
+    if queue_id_col and queue_id_col in filtered_df.columns:
+        queue_start_column = queue_id_col
+
+if queue_start_column:
+    start_idx = filtered_df.columns.get_loc(queue_start_column)
+    if isinstance(start_idx, int):
+        queue_display_df = filtered_df.iloc[:, start_idx:]
+
+st.dataframe(queue_display_df, use_container_width=True, height=420)
 st.download_button(
     label="Download Filtered Data (CSV)",
-    data=filtered_df.to_csv(index=False).encode("utf-8"),
+    data=queue_display_df.to_csv(index=False).encode("utf-8"),
     file_name="ercot_queue_filtered.csv",
     mime="text/csv",
 )
