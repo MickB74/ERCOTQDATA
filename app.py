@@ -208,22 +208,26 @@ def _selected_customdata_values(event: object, index: int) -> list[str]:
     return sorted(values)
 
 
-def _update_chart_filter(filter_key: str, values: list[str]) -> bool:
-    if not values:
+def _event_has_selection(event: object) -> bool:
+    if event is None:
+        return False
+    if isinstance(event, dict):
+        return isinstance(event.get("selection"), dict)
+    return getattr(event, "selection", None) is not None
+
+
+def _update_chart_filter(
+    filter_key: str,
+    values: list[str],
+    *,
+    event_has_selection: bool = False,
+) -> bool:
+    if not event_has_selection:
         return False
 
     chart_filters = st.session_state.setdefault("chart_filters", {})
     existing_values = chart_filters.get(filter_key, [])
-    updated_values = set(existing_values)
-
-    for value in values:
-        normalized = _normalize_filter_value(value)
-        if normalized in updated_values:
-            updated_values.remove(normalized)
-        else:
-            updated_values.add(normalized)
-
-    merged_values = sorted(updated_values)
+    merged_values = sorted({_normalize_filter_value(value) for value in values if str(value).strip()})
     if existing_values == merged_values:
         return False
 
@@ -834,7 +838,7 @@ if fuel_display_col and fuel_display_col in fuel_chart_df.columns:
         selection_mode=("points", "box", "lasso"),
     )
     fuel_selected = _selected_values_from_event(fuel_event, "x")
-    if _update_chart_filter("fuel", fuel_selected):
+    if _update_chart_filter("fuel", fuel_selected, event_has_selection=_event_has_selection(fuel_event)):
         st.rerun()
 else:
     chart_col_1.info("No fuel column detected for fuel chart.")
@@ -876,7 +880,11 @@ if technology_display_col and technology_display_col in technology_chart_df.colu
         selection_mode=("points", "box", "lasso"),
     )
     technology_count_selected = _selected_values_from_event(technology_count_event, "x")
-    if _update_chart_filter("technology", technology_count_selected):
+    if _update_chart_filter(
+        "technology",
+        technology_count_selected,
+        event_has_selection=_event_has_selection(technology_count_event),
+    ):
         st.rerun()
 else:
     chart_col_2.info("No technology column detected for technology chart.")
@@ -923,7 +931,11 @@ if technology_display_col and technology_display_col in technology_chart_df.colu
             selection_mode=("points", "box", "lasso"),
         )
         technology_mw_selected = _selected_values_from_event(technology_mw_event, "x")
-        if _update_chart_filter("technology", technology_mw_selected):
+        if _update_chart_filter(
+            "technology",
+            technology_mw_selected,
+            event_has_selection=_event_has_selection(technology_mw_event),
+        ):
             st.rerun()
     else:
         st.info("Capacity (MW) column missing for technology MW chart.")
@@ -997,7 +1009,7 @@ if cod_col and cod_col in cod_chart_df.columns:
                 selection_mode=("points", "box", "lasso"),
             )
             cod_mw_selected = _selected_values_from_event(cod_mw_event, "x")
-            if _update_chart_filter("cod_year", cod_mw_selected):
+            if _update_chart_filter("cod_year", cod_mw_selected, event_has_selection=_event_has_selection(cod_mw_event)):
                 st.rerun()
 
             cod_count_fig = px.bar(
@@ -1027,7 +1039,11 @@ if cod_col and cod_col in cod_chart_df.columns:
                 selection_mode=("points", "box", "lasso"),
             )
             cod_count_selected = _selected_values_from_event(cod_count_event, "x")
-            if _update_chart_filter("cod_year", cod_count_selected):
+            if _update_chart_filter(
+                "cod_year",
+                cod_count_selected,
+                event_has_selection=_event_has_selection(cod_count_event),
+            ):
                 st.rerun()
 
             cod_totals["cumulative_capacity_mw"] = cod_totals[capacity_col].fillna(0).cumsum()
@@ -1068,7 +1084,11 @@ if cod_col and cod_col in cod_chart_df.columns:
                 selection_mode=("points", "box", "lasso"),
             )
             cod_count_selected = _selected_values_from_event(cod_count_event, "x")
-            if _update_chart_filter("cod_year", cod_count_selected):
+            if _update_chart_filter(
+                "cod_year",
+                cod_count_selected,
+                event_has_selection=_event_has_selection(cod_count_event),
+            ):
                 st.rerun()
 
             cod_totals["cumulative_projects"] = cod_totals["projects"].cumsum()
@@ -1089,7 +1109,7 @@ if cod_col and cod_col in cod_chart_df.columns:
             selection_mode=("points", "box", "lasso"),
         )
         timeline_selected = _selected_values_from_event(timeline_event, "x")
-        if _update_chart_filter("cod_year", timeline_selected):
+        if _update_chart_filter("cod_year", timeline_selected, event_has_selection=_event_has_selection(timeline_event)):
             st.rerun()
 
 
@@ -1150,7 +1170,7 @@ if dev_col and dev_col in developer_chart_df.columns:
             selection_mode=("points", "box", "lasso"),
         )
         dev_mw_selected = _selected_values_from_event(dev_mw_event, "y")
-        if _update_chart_filter("developer", dev_mw_selected):
+        if _update_chart_filter("developer", dev_mw_selected, event_has_selection=_event_has_selection(dev_mw_event)):
             st.rerun()
 
     # Top 15 by Count
@@ -1194,7 +1214,7 @@ if dev_col and dev_col in developer_chart_df.columns:
         selection_mode=("points", "box", "lasso"),
     )
     dev_count_selected = _selected_values_from_event(dev_count_event, "y")
-    if _update_chart_filter("developer", dev_count_selected):
+    if _update_chart_filter("developer", dev_count_selected, event_has_selection=_event_has_selection(dev_count_event)):
         st.rerun()
 else:
     st.info("No developer column detected for developer analysis.")
@@ -1243,10 +1263,10 @@ if zone_col and zone_col in zone_chart_df.columns:
             selection_mode=("points", "box", "lasso"),
         )
         zone_selected = _selected_customdata_values(zone_event, 0)
-        if _update_chart_filter("zone", zone_selected):
+        if _update_chart_filter("zone", zone_selected, event_has_selection=_event_has_selection(zone_event)):
             st.rerun()
         fuel_selected = _selected_customdata_values(zone_event, 1)
-        if _update_chart_filter("fuel", fuel_selected):
+        if _update_chart_filter("fuel", fuel_selected, event_has_selection=_event_has_selection(zone_event)):
             st.rerun()
     else:
         st.info("Capacity (MW) column missing for regional analysis.")
