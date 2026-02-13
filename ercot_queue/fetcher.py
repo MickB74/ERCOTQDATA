@@ -219,7 +219,44 @@ def _read_table_bytes(content: bytes, source_name: str, content_type: str) -> pd
     source_lower = source_name.lower()
 
     if source_lower.endswith((".xls", ".xlsx")) or "excel" in content_type or "spreadsheet" in content_type:
-        return pd.read_excel(io.BytesIO(content))
+        try:
+            xls = pd.ExcelFile(io.BytesIO(content))
+            sheet_dfs = []
+            valid_sheets = []
+            
+            for sheet_name in xls.sheet_names:
+                df = pd.read_excel(xls, sheet_name=sheet_name)
+                # Skip very small sheets or metadata/summary sheets
+                if df.empty or len(df) < 2:
+                    continue
+                
+                # Check for project-like columns
+                cols = [str(c).lower() for c in df.columns]
+                is_valid = any(
+                    any(term in col for term in ["queue", "project", "gir", "inr"])
+                    for col in cols
+                )
+                
+                if is_valid:
+                    valid_sheets.append(sheet_name)
+                    sheet_dfs.append(df)
+            
+            if not sheet_dfs:
+                return pd.DataFrame()
+            
+            if len(sheet_dfs) == 1:
+                return sheet_dfs[0]
+                
+            # Aggregate sheets
+            combined = pd.concat(sheet_dfs, ignore_index=True, sort=False)
+            return combined
+            
+        except Exception as exc:
+            # Fallback to single read if ExcelFile fails
+            try:
+                return pd.read_excel(io.BytesIO(content))
+            except:
+                pass
 
     if source_lower.endswith(".csv") or "csv" in content_type or "text/plain" in content_type:
         return _read_csv_with_fallbacks(content)
