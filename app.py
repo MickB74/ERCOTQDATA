@@ -83,6 +83,8 @@ if current_df is None or current_df.empty:
 semantic = infer_semantic_columns(current_df)
 filtered_df = current_df.copy()
 
+capacity_col = semantic.get("capacity_mw")
+
 with st.sidebar:
     st.header("Filters")
 
@@ -91,13 +93,25 @@ with st.sidebar:
         if not column or column not in filtered_df.columns:
             continue
 
-        options = sorted(
-            {
-                str(value)
-                for value in filtered_df[column].dropna().astype(str)
-                if str(value).strip()
-            }
-        )
+        if semantic_key == "developer" and capacity_col and capacity_col in current_df.columns:
+            # Sort developers by total MW (descending)
+            options = (
+                current_df.groupby(column)[capacity_col]
+                .sum()
+                .sort_values(ascending=False)
+                .index.dropna()
+                .astype(str)
+                .tolist()
+            )
+        else:
+            options = sorted(
+                {
+                    str(value)
+                    for value in filtered_df[column].dropna().astype(str)
+                    if str(value).strip()
+                }
+            )
+
         if not options:
             continue
 
@@ -111,7 +125,6 @@ with st.sidebar:
                 # If nothing selected and not "Select All", show nothing
                 filtered_df = filtered_df[filtered_df[column].isna()]
 
-    capacity_col = semantic.get("capacity_mw")
     if capacity_col and capacity_col in filtered_df.columns:
         numeric_capacity = pd.to_numeric(filtered_df[capacity_col], errors="coerce")
         if numeric_capacity.notna().any():
