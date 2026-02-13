@@ -59,6 +59,9 @@ def save_snapshot(
         "change_path": str(change_path),
         "source": source_metadata.get("source", "unknown"),
         "source_url": source_metadata.get("source_url"),
+        "index_url": source_metadata.get("index_url"),
+        "data_product_url": source_metadata.get("data_product_url"),
+        "report_type_id": source_metadata.get("report_type_id"),
         "diff_summary": diff_report.get("summary", {}),
     }
 

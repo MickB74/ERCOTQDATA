@@ -5,7 +5,7 @@ from datetime import datetime
 
 # Standardize ercot_queue package access
 try:
-    from ercot_queue.config import MAX_CHANGE_SAMPLE_ROWS
+    from ercot_queue.config import DEFAULT_DATA_PRODUCT_URLS, MAX_CHANGE_SAMPLE_ROWS
     from ercot_queue.diffing import calculate_diff
     from ercot_queue.fetcher import fetch_latest_ercot_queue
     from ercot_queue.processing import infer_semantic_columns, prepare_queue_dataframe
@@ -54,13 +54,20 @@ st.caption(
 
 with st.sidebar:
     st.header("Data Refresh")
+    default_source_url = st.session_state.get(
+        "ercot_source_url",
+        DEFAULT_DATA_PRODUCT_URLS[0] if DEFAULT_DATA_PRODUCT_URLS else "",
+    )
     custom_url = st.text_input(
-        "Custom ERCOT file URL (optional)",
+        "ERCOT Source URL",
+        value=default_source_url,
         help=(
-            "Leave blank to auto-discover latest GIS from ERCOT data product PG7-200-ER. "
-            "You can also paste an ERCOT data-product-details URL or direct ERCOT file URL."
+            "Defaults to ERCOT data product PG7-200-ER. "
+            "You can paste an ERCOT data-product-details URL or direct ERCOT file URL."
         ),
     ).strip()
+    st.session_state["ercot_source_url"] = custom_url
+    st.caption("Primary source: https://www.ercot.com/mp/data-products/data-product-details?id=pg7-200-er")
 
     if st.button("Refresh Data", type="primary", use_container_width=True):
         with st.spinner("Fetching and diffing latest data..."):
@@ -186,6 +193,15 @@ else:
 
 pulled_at_text = current_meta.get("pulled_at_utc", "Unknown") if current_meta else "Unknown"
 metric_cols[3].metric("Last Pull (UTC)", _format_timestamp(pulled_at_text))
+
+if current_meta:
+    st.caption(
+        "Source: "
+        f"{current_meta.get('source', 'unknown')} | "
+        f"Report Type ID: {current_meta.get('report_type_id', 'n/a')}"
+    )
+    st.caption(f"Data Product URL: {current_meta.get('data_product_url', 'n/a')}")
+    st.caption(f"Latest GIS URL: {current_meta.get('source_url', 'n/a')}")
 
 chart_col_1, chart_col_2 = st.columns(2)
 
@@ -402,6 +418,8 @@ if history:
             "row_count",
             "source",
             "source_url",
+            "data_product_url",
+            "report_type_id",
             "diff_summary",
         ]
         if col in history_df.columns
