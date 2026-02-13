@@ -518,20 +518,14 @@ def _render_operating_assets_view() -> None:
             if selected and set(selected) != set(options):
                 filtered_assets = filtered_assets[filtered_assets[column].astype(str).isin(selected)]
 
-    metric_cols = st.columns(4)
-    metric_cols[0].metric("Operating Rows", f"{len(filtered_assets):,}")
-    metric_cols[1].metric("Total Rows", f"{len(assets_df):,}")
+    metric_cols = st.columns(3)
     official_operational = assets_meta.get("operational_installed_capacity_mw")
-    official_total_resources = assets_meta.get("total_resources_mw")
-    if capacity_col and capacity_col in filtered_assets.columns:
-        total_capacity = float(pd.to_numeric(filtered_assets[capacity_col], errors="coerce").sum(skipna=True))
-        if isinstance(official_operational, (int, float)):
-            metric_cols[2].metric("Operational Installed Capacity (MW)", f"{float(official_operational):,.0f}")
-        else:
-            metric_cols[2].metric("Reported Capacity (MW)", f"{total_capacity:,.0f}")
+    if isinstance(official_operational, (int, float)):
+        metric_cols[0].metric("Operational Installed Capacity (MW)", f"{float(official_operational):,.0f}")
     else:
-        metric_cols[2].metric("Reported Capacity (MW)", "n/a")
-    metric_cols[3].metric("Source Workbook", assets_meta.get("report_label", "latest"))
+        metric_cols[0].metric("Operational Installed Capacity (MW)", "n/a")
+    metric_cols[1].metric("Operating Rows", f"{len(filtered_assets):,}")
+    metric_cols[2].metric("Source Workbook", assets_meta.get("report_label", "latest"))
 
     if assets_meta:
         st.caption(
@@ -546,16 +540,7 @@ def _render_operating_assets_view() -> None:
                 "ERCOT official total operational installed capacity: "
                 f"{float(official_operational):,.0f} MW."
             )
-        if isinstance(official_total_resources, (int, float)):
-            st.caption(
-                "ERCOT official total resources (operational + planned): "
-                f"{float(official_total_resources):,.0f} MW."
-            )
-        if capacity_col and capacity_col in filtered_assets.columns:
-            st.caption(
-                f"Current table sum for `{capacity_col}` after filters: {total_capacity:,.0f} MW "
-                "(detail-row sum, not the ERCOT summary total)."
-            )
+            st.caption("This value comes from ERCOT's MORA summary and does not change with row filters.")
 
     chart_col_1, chart_col_2 = st.columns(2)
     if fuel_col and fuel_col in filtered_assets.columns:
