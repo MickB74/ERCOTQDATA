@@ -446,9 +446,10 @@ with st.sidebar:
         st.rerun()
 
 chart_filters: dict[str, list[str]] = st.session_state.setdefault("chart_filters", {})
-if chart_filters.get("status") and status_col and status_col in filtered_df.columns:
-    selected_status = set(chart_filters["status"])
-    filtered_df = filtered_df[filtered_df[status_col].map(_normalize_filter_value).isin(selected_status)]
+# Status chart was removed; drop any stale status chart selection.
+if "status" in chart_filters:
+    chart_filters.pop("status", None)
+
 if chart_filters.get("fuel") and fuel_display_col and fuel_display_col in filtered_df.columns:
     selected_fuel = set(chart_filters["fuel"])
     filtered_df = filtered_df[filtered_df[fuel_display_col].map(_normalize_filter_value).isin(selected_fuel)]
@@ -470,8 +471,6 @@ if chart_filters.get("cod_year") and cod_col and cod_col in filtered_df.columns:
 
 if chart_filters:
     chart_filter_labels: list[str] = []
-    if "status" in chart_filters:
-        chart_filter_labels.append("Status (chart)")
     if "fuel" in chart_filters:
         chart_filter_labels.append("Fuel (chart)")
     if "technology" in chart_filters:
@@ -548,28 +547,8 @@ if current_meta:
         with st.expander("Tabs Processed In Latest Pull", expanded=False):
             st.write(", ".join(tabs_processed))
 
+st.subheader("Fuel and Technology Mix")
 chart_col_1, chart_col_2 = st.columns(2)
-
-if status_col and status_col in filtered_df.columns:
-    status_plot = (
-        filtered_df.groupby(status_col, dropna=False)
-        .size()
-        .reset_index(name="projects")
-        .sort_values("projects", ascending=False)
-    )
-    status_fig = px.bar(status_plot, x=status_col, y="projects", title="Projects by Status")
-    status_fig.update_layout(clickmode="event+select")
-    status_event = chart_col_1.plotly_chart(
-        status_fig,
-        use_container_width=True,
-        key="status_chart",
-        on_select="rerun",
-    )
-    status_selected = _selected_values_from_event(status_event, "x")
-    if _update_chart_filter("status", status_selected):
-        st.rerun()
-else:
-    chart_col_1.info("No status column detected for status chart.")
 
 if fuel_display_col and fuel_display_col in filtered_df.columns:
     fuel_plot = (
@@ -591,12 +570,9 @@ if fuel_display_col and fuel_display_col in filtered_df.columns:
     if _update_chart_filter("fuel", fuel_selected):
         st.rerun()
 else:
-    chart_col_2.info("No fuel column detected for fuel chart.")
+    chart_col_1.info("No fuel column detected for fuel chart.")
 
-st.subheader("Projects by Technology")
 if technology_display_col and technology_display_col in filtered_df.columns:
-    tech_col_1, tech_col_2 = st.columns(2)
-
     technology_count_plot = (
         filtered_df.groupby(technology_display_col, dropna=False)
         .size()
@@ -611,7 +587,7 @@ if technology_display_col and technology_display_col in filtered_df.columns:
         title="Projects by Technology (Count)",
     )
     technology_count_fig.update_layout(clickmode="event+select")
-    technology_count_event = tech_col_1.plotly_chart(
+    technology_count_event = chart_col_2.plotly_chart(
         technology_count_fig,
         use_container_width=True,
         key="technology_count_chart",
@@ -620,7 +596,11 @@ if technology_display_col and technology_display_col in filtered_df.columns:
     technology_count_selected = _selected_values_from_event(technology_count_event, "x")
     if _update_chart_filter("technology", technology_count_selected):
         st.rerun()
+else:
+    chart_col_2.info("No technology column detected for technology chart.")
 
+st.subheader("Technology Capacity (MW)")
+if technology_display_col and technology_display_col in filtered_df.columns:
     if capacity_col and capacity_col in filtered_df.columns:
         technology_mw_df = filtered_df.copy()
         technology_mw_df[capacity_col] = pd.to_numeric(technology_mw_df[capacity_col], errors="coerce")
@@ -639,7 +619,7 @@ if technology_display_col and technology_display_col in filtered_df.columns:
             labels={capacity_col: "MW"},
         )
         technology_mw_fig.update_layout(clickmode="event+select")
-        technology_mw_event = tech_col_2.plotly_chart(
+        technology_mw_event = st.plotly_chart(
             technology_mw_fig,
             use_container_width=True,
             key="technology_mw_chart",
@@ -649,9 +629,9 @@ if technology_display_col and technology_display_col in filtered_df.columns:
         if _update_chart_filter("technology", technology_mw_selected):
             st.rerun()
     else:
-        tech_col_2.info("Capacity (MW) column missing for technology MW chart.")
+        st.info("Capacity (MW) column missing for technology MW chart.")
 else:
-    st.info("No technology column detected for technology chart.")
+    st.info("No technology column detected for technology MW chart.")
 
 cod_col = semantic.get("cod_date")
 if cod_col and cod_col in filtered_df.columns:
