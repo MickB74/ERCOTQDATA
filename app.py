@@ -435,6 +435,35 @@ def _first_matching_column(columns: list[str], patterns: list[str]) -> str | Non
     return None
 
 
+def _prepare_operating_assets_dataframe(raw_df: pd.DataFrame) -> pd.DataFrame:
+    if raw_df is None or raw_df.empty:
+        return pd.DataFrame()
+
+    df = raw_df.copy()
+    df = df.dropna(axis=1, how="all").dropna(axis=0, how="all")
+    df.columns = [
+        re.sub(r"_+", "_", re.sub(r"[^a-z0-9]+", "_", str(column).strip().lower())).strip("_") or "column"
+        for column in df.columns
+    ]
+
+    for column in df.select_dtypes(include=["object", "string"]).columns:
+        cleaned = df[column].astype("string").str.strip()
+        df[column] = cleaned.mask(cleaned.eq(""), pd.NA)
+
+    for column in df.columns:
+        lower = column.lower()
+        if "mw" in lower or "capacity" in lower or "mora" in lower:
+            numeric = pd.to_numeric(df[column], errors="coerce")
+            if numeric.notna().any():
+                df[column] = numeric
+        if "in_service" in lower:
+            years = pd.to_numeric(df[column], errors="coerce")
+            if years.notna().mean() > 0.7:
+                df[column] = years.round().astype("Int64")
+
+    return df.reset_index(drop=True)
+
+
 def _render_operating_assets_view() -> None:
     st.subheader("Operating Assets (ERCOT MORA)")
     st.caption("Source: ERCOT Resource Adequacy page (latest MORA workbook).")
@@ -458,7 +487,7 @@ def _render_operating_assets_view() -> None:
         st.error(f"Could not load operating assets from ERCOT: {exc}")
         return
 
-    assets_df = prepare_queue_dataframe(assets_df)
+    assets_df = _prepare_operating_assets_dataframe(assets_df)
     semantic = infer_semantic_columns(assets_df)
 
     status_col = semantic.get("status")
@@ -492,9 +521,14 @@ def _render_operating_assets_view() -> None:
     metric_cols = st.columns(4)
     metric_cols[0].metric("Operating Rows", f"{len(filtered_assets):,}")
     metric_cols[1].metric("Total Rows", f"{len(assets_df):,}")
+    official_operational = assets_meta.get("operational_installed_capacity_mw")
+    official_total_resources = assets_meta.get("total_resources_mw")
     if capacity_col and capacity_col in filtered_assets.columns:
         total_capacity = float(pd.to_numeric(filtered_assets[capacity_col], errors="coerce").sum(skipna=True))
-        metric_cols[2].metric("Reported Capacity (MW)", f"{total_capacity:,.0f}")
+        if isinstance(official_operational, (int, float)):
+            metric_cols[2].metric("Operational Installed Capacity (MW)", f"{float(official_operational):,.0f}")
+        else:
+            metric_cols[2].metric("Reported Capacity (MW)", f"{total_capacity:,.0f}")
     else:
         metric_cols[2].metric("Reported Capacity (MW)", "n/a")
     metric_cols[3].metric("Source Workbook", assets_meta.get("report_label", "latest"))
@@ -507,6 +541,21 @@ def _render_operating_assets_view() -> None:
         refreshed_at = st.session_state.get("operating_assets_refreshed_at")
         if refreshed_at:
             st.caption(f"Last manual refresh check (UTC): {refreshed_at}")
+        if isinstance(official_operational, (int, float)):
+            st.caption(
+                "ERCOT official total operational installed capacity: "
+                f"{float(official_operational):,.0f} MW."
+            )
+        if isinstance(official_total_resources, (int, float)):
+            st.caption(
+                "ERCOT official total resources (operational + planned): "
+                f"{float(official_total_resources):,.0f} MW."
+            )
+        if capacity_col and capacity_col in filtered_assets.columns:
+            st.caption(
+                f"Current table sum for `{capacity_col}` after filters: {total_capacity:,.0f} MW "
+                "(detail-row sum, not the ERCOT summary total)."
+            )
 
     chart_col_1, chart_col_2 = st.columns(2)
     if fuel_col and fuel_col in filtered_assets.columns:

@@ -137,6 +137,7 @@ def fetch_latest_operating_assets(index_url: str | None = None) -> tuple[pd.Data
     workbook_url, workbook_label = discover_latest_mora_workbook_url(resource_index_url)
     content, _, effective_url = _fetch_url(workbook_url)
     xls = pd.ExcelFile(io.BytesIO(content))
+    summary_totals = _extract_mora_summary_totals(content)
 
     preferred_sheet = _select_operating_assets_sheet(xls.sheet_names)
     sheet_df, header_row, header_score = _read_sheet_best_effort(xls, preferred_sheet)
@@ -155,6 +156,7 @@ def fetch_latest_operating_assets(index_url: str | None = None) -> tuple[pd.Data
         "report_label": workbook_label,
         "tab_count": len(xls.sheet_names),
         "tabs_processed": [preferred_sheet],
+        **summary_totals,
     }
     return cleaned, meta
 
@@ -226,6 +228,125 @@ def _select_operating_assets_sheet(sheet_names: list[str]) -> str:
                 return original
 
     return sheet_names[0]
+
+
+def _extract_mora_summary_totals(workbook_bytes: bytes) -> dict[str, float | None]:
+    patterns = {
+        "operational_installed_capacity_mw": re.compile(
+            r"(total\s+operational.*installed\s+capacity|operational\s+resources.*installed\s+capacity)",
+            flags=re.IGNORECASE,
+        ),
+        "total_resources_mw": re.compile(
+            r"(total\s+resources|operational\s*\+\s*planned)",
+            flags=re.IGNORECASE,
+        ),
+    }
+
+    results: dict[str, float | None] = {
+        "operational_installed_capacity_mw": None,
+        "total_resources_mw": None,
+    }
+
+    try:
+        workbook = load_workbook(io.BytesIO(workbook_bytes), data_only=True, read_only=True)
+    except Exception:
+        return results
+
+    try:
+        for sheet_name in workbook.sheetnames:
+            sheet = workbook[sheet_name]
+            for row in sheet.iter_rows(values_only=True):
+                text_parts = [str(value).strip() for value in row if isinstance(value, str) and str(value).strip()]
+                if not text_parts:
+                    continue
+                row_text = " ".join(text_parts)
+                numeric_values = [
+                    numeric
+                    for numeric in (_to_positive_float(value) for value in row)
+                    if numeric is not None
+                ]
+                if not numeric_values:
+                    continue
+
+                for key, pattern in patterns.items():
+                    if pattern.search(row_text):
+                        large_values = [value for value in numeric_values if value >= 50000]
+                        if not large_values:
+                            continue
+                        candidate = max(large_values)
+                        current = results.get(key)
+                        if current is None or candidate > current:
+                            results[key] = candidate
+
+        operational_from_categories = _extract_operational_from_capacity_sheet(workbook)
+        if operational_from_categories is not None:
+            results["operational_installed_capacity_mw"] = operational_from_categories
+    finally:
+        workbook.close()
+
+    return results
+
+
+def _extract_operational_from_capacity_sheet(workbook: Any) -> float | None:
+    target_sheet = None
+    for name in workbook.sheetnames:
+        if "capacity by resource category" in name.lower():
+            target_sheet = workbook[name]
+            break
+    if target_sheet is None:
+        return None
+
+    operational_labels = {
+        "thermal",
+        "renewable, intermittent [6]",
+        "renewable, other",
+        "energy storage",
+        "dc tie net imports",
+    }
+
+    in_operational_block = False
+    total_operational = 0.0
+    found_any = False
+
+    for row in target_sheet.iter_rows(values_only=True):
+        first_text = None
+        row_text_parts: list[str] = []
+        for value in row:
+            if isinstance(value, str) and value.strip():
+                row_text_parts.append(value.strip().lower())
+                if first_text is None:
+                    first_text = value.strip().lower()
+
+        if not first_text:
+            continue
+        row_text = " ".join(row_text_parts)
+
+        if "operational resources" in row_text and "installed capacity" in row_text:
+            in_operational_block = True
+            continue
+        if in_operational_block and "planned resources" in row_text:
+            break
+        if not in_operational_block:
+            continue
+        if first_text not in operational_labels:
+            continue
+
+        numeric_values = [
+            float(value)
+            for value in row
+            if isinstance(value, (int, float)) and float(value) > 0
+        ]
+        if not numeric_values:
+            continue
+
+        # In this sheet the first numeric is installed capacity rating.
+        total_operational += numeric_values[0]
+        found_any = True
+
+    if not found_any:
+        return None
+
+    return round(total_operational, 2)
 
 
 def discover_report_index_from_product_page(product_url: str) -> tuple[str, dict[str, Any]]:
