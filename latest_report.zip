@@ -1,0 +1,1 @@
+{"ResponseFaultList":[{"ResponseFault":{"FaultID":1,"FaultDescription":"Did not recieve a numeric ReportTypeId. [reporttypeid] required."}}]}

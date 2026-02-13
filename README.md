@@ -4,7 +4,7 @@ Interactive Streamlit app to pull the ERCOT interconnection queue, explore it wi
 
 ## Features
 
-- Pull latest queue data from ERCOT sources (or from a custom file URL)
+- Pull latest queue data from ERCOT sources (or from a custom ERCOT file URL)
 - Snapshot every refresh with UTC pull timestamp
 - Detect and report row-level changes:
   - added projects
@@ -49,8 +49,8 @@ streamlit run app.py
 
 ## Notes
 
-- Auto-fetch first tries `gridstatus`, then attempts ERCOT MIS report link discovery.
-- If your environment blocks one or both methods, paste a direct CSV/XLS/XLSX/ZIP file URL into `Custom ERCOT file URL` and refresh.
+- Auto-fetch uses ERCOT MIS report link discovery only (ERCOT-hosted URLs).
+- If auto-discovery fails, paste a direct ERCOT CSV/XLS/XLSX/ZIP URL into `Custom ERCOT file URL` and refresh.
 - All pull timestamps are stored in UTC.
 
 ## Optional Environment Variables
