@@ -2,6 +2,7 @@ import streamlit as st
 import pandas as pd
 import plotly.express as px
 from datetime import datetime
+from typing import Any
 
 # Standardize ercot_queue package access
 try:
@@ -143,6 +144,79 @@ def _extract_project_detail_capacity_mw(df: pd.DataFrame, capacity_column: str |
         return None
 
     return float(capacity.sum(skipna=True))
+
+
+def _normalize_filter_value(value: object) -> str:
+    if value is None or pd.isna(value):
+        return "Unknown"
+    if isinstance(value, pd.Timestamp):
+        return value.strftime("%Y-%m-%d")
+
+    text = str(value).strip()
+    return text if text else "Unknown"
+
+
+def _extract_plotly_points(event: object) -> list[Any]:
+    if event is None:
+        return []
+
+    if isinstance(event, dict):
+        selection = event.get("selection")
+        if isinstance(selection, dict):
+            points = selection.get("points")
+            if isinstance(points, list):
+                return points
+        return []
+
+    selection = getattr(event, "selection", None)
+    if selection is None:
+        return []
+
+    points = getattr(selection, "points", None)
+    if isinstance(points, list):
+        return points
+    return []
+
+
+def _selection_point_value(point: Any, field: str) -> object:
+    if isinstance(point, dict):
+        return point.get(field)
+    return getattr(point, field, None)
+
+
+def _selected_values_from_event(event: object, field: str) -> list[str]:
+    values: set[str] = set()
+    for point in _extract_plotly_points(event):
+        raw = _selection_point_value(point, field)
+        if raw is None:
+            continue
+        values.add(_normalize_filter_value(raw))
+    return sorted(values)
+
+
+def _selected_customdata_values(event: object, index: int) -> list[str]:
+    values: set[str] = set()
+    for point in _extract_plotly_points(event):
+        custom_data = _selection_point_value(point, "customdata")
+        if not isinstance(custom_data, (list, tuple)):
+            continue
+        if len(custom_data) <= index:
+            continue
+        values.add(_normalize_filter_value(custom_data[index]))
+    return sorted(values)
+
+
+def _update_chart_filter(filter_key: str, values: list[str]) -> bool:
+    if not values:
+        return False
+
+    chart_filters = st.session_state.setdefault("chart_filters", {})
+    existing = chart_filters.get(filter_key, [])
+    if existing == values:
+        return False
+
+    chart_filters[filter_key] = values
+    return True
 
 
 st.set_page_config(
@@ -364,6 +438,55 @@ with st.sidebar:
             else:
                 st.caption(f"COD Date: {min_date}")
 
+with st.sidebar:
+    st.markdown("---")
+    if st.button("Clear Chart Selections", use_container_width=True):
+        st.session_state["chart_filters"] = {}
+        st.rerun()
+
+chart_filters: dict[str, list[str]] = st.session_state.setdefault("chart_filters", {})
+if chart_filters.get("status") and status_col and status_col in filtered_df.columns:
+    selected_status = set(chart_filters["status"])
+    filtered_df = filtered_df[filtered_df[status_col].map(_normalize_filter_value).isin(selected_status)]
+if chart_filters.get("fuel") and fuel_display_col and fuel_display_col in filtered_df.columns:
+    selected_fuel = set(chart_filters["fuel"])
+    filtered_df = filtered_df[filtered_df[fuel_display_col].map(_normalize_filter_value).isin(selected_fuel)]
+if chart_filters.get("technology") and technology_display_col and technology_display_col in filtered_df.columns:
+    selected_technology = set(chart_filters["technology"])
+    filtered_df = filtered_df[filtered_df[technology_display_col].map(_normalize_filter_value).isin(selected_technology)]
+if chart_filters.get("developer") and developer_col and developer_col in filtered_df.columns:
+    selected_developer = set(chart_filters["developer"])
+    filtered_df = filtered_df[filtered_df[developer_col].map(_normalize_filter_value).isin(selected_developer)]
+if chart_filters.get("zone") and zone_col and zone_col in filtered_df.columns:
+    selected_zone = set(chart_filters["zone"])
+    filtered_df = filtered_df[filtered_df[zone_col].map(_normalize_filter_value).isin(selected_zone)]
+
+if chart_filters.get("cod_month") and cod_col and cod_col in filtered_df.columns:
+    selected_months = set(chart_filters["cod_month"])
+    cod_month = (
+        pd.to_datetime(filtered_df[cod_col], errors="coerce")
+        .dt.to_period("M")
+        .dt.to_timestamp()
+        .dt.strftime("%Y-%m-%d")
+    )
+    filtered_df = filtered_df[cod_month.isin(selected_months)]
+
+if chart_filters:
+    chart_filter_labels: list[str] = []
+    if "status" in chart_filters:
+        chart_filter_labels.append("Status (chart)")
+    if "fuel" in chart_filters:
+        chart_filter_labels.append("Fuel (chart)")
+    if "technology" in chart_filters:
+        chart_filter_labels.append("Technology (chart)")
+    if "developer" in chart_filters:
+        chart_filter_labels.append("Developer (chart)")
+    if "zone" in chart_filters:
+        chart_filter_labels.append("Zone (chart)")
+    if "cod_month" in chart_filters:
+        chart_filter_labels.append("COD Month (chart)")
+    active_filters.extend(chart_filter_labels)
+
 
 st.subheader("Current Snapshot")
 metric_cols = st.columns(4)
@@ -431,29 +554,23 @@ if current_meta:
 chart_col_1, chart_col_2 = st.columns(2)
 
 if status_col and status_col in filtered_df.columns:
-    status_data = filtered_df.copy()
-    if capacity_col and capacity_col in status_data.columns:
-        status_data[capacity_col] = pd.to_numeric(status_data[capacity_col], errors="coerce")
-        plot_df = (
-            status_data.groupby(status_col, dropna=False)[capacity_col]
-            .sum(min_count=1)
-            .reset_index()
-            .sort_values(capacity_col, ascending=False)
-        )
-        y_axis = capacity_col
-        title = "Capacity by Status"
-    else:
-        plot_df = (
-            status_data.groupby(status_col, dropna=False)
-            .size()
-            .reset_index(name="projects")
-            .sort_values("projects", ascending=False)
-        )
-        y_axis = "projects"
-        title = "Projects by Status"
-
-    status_fig = px.bar(plot_df, x=status_col, y=y_axis, title=title)
-    chart_col_1.plotly_chart(status_fig, use_container_width=True)
+    status_plot = (
+        filtered_df.groupby(status_col, dropna=False)
+        .size()
+        .reset_index(name="projects")
+        .sort_values("projects", ascending=False)
+    )
+    status_fig = px.bar(status_plot, x=status_col, y="projects", title="Projects by Status")
+    status_fig.update_layout(clickmode="event+select")
+    status_event = chart_col_1.plotly_chart(
+        status_fig,
+        use_container_width=True,
+        key="status_chart",
+        on_select="rerun",
+    )
+    status_selected = _selected_values_from_event(status_event, "x")
+    if _update_chart_filter("status", status_selected):
+        st.rerun()
 else:
     chart_col_1.info("No status column detected for status chart.")
 
@@ -466,7 +583,16 @@ if fuel_display_col and fuel_display_col in filtered_df.columns:
         .head(20)
     )
     fuel_fig = px.bar(fuel_plot, x=fuel_display_col, y="projects", title="Projects by Fuel")
-    chart_col_2.plotly_chart(fuel_fig, use_container_width=True)
+    fuel_fig.update_layout(clickmode="event+select")
+    fuel_event = chart_col_2.plotly_chart(
+        fuel_fig,
+        use_container_width=True,
+        key="fuel_chart",
+        on_select="rerun",
+    )
+    fuel_selected = _selected_values_from_event(fuel_event, "x")
+    if _update_chart_filter("fuel", fuel_selected):
+        st.rerun()
 else:
     chart_col_2.info("No fuel column detected for fuel chart.")
 
@@ -485,7 +611,16 @@ if technology_display_col and technology_display_col in filtered_df.columns:
         y="projects",
         title="Projects by Technology",
     )
-    st.plotly_chart(technology_fig, use_container_width=True)
+    technology_fig.update_layout(clickmode="event+select")
+    technology_event = st.plotly_chart(
+        technology_fig,
+        use_container_width=True,
+        key="technology_chart",
+        on_select="rerun",
+    )
+    technology_selected = _selected_values_from_event(technology_event, "x")
+    if _update_chart_filter("technology", technology_selected):
+        st.rerun()
 else:
     st.info("No technology column detected for technology chart.")
 
@@ -526,7 +661,23 @@ if cod_col and cod_col in filtered_df.columns:
                 y="cumulative_projects",
                 title="Cumulative Projects by COD",
             )
-        st.plotly_chart(timeline_fig, use_container_width=True)
+        timeline_fig.update_layout(clickmode="event+select")
+        timeline_event = st.plotly_chart(
+            timeline_fig,
+            use_container_width=True,
+            key="timeline_chart",
+            on_select="rerun",
+        )
+        timeline_selected_raw = _selected_values_from_event(timeline_event, "x")
+        timeline_selected = sorted(
+            {
+                ts.strftime("%Y-%m-%d")
+                for ts in pd.to_datetime(pd.Series(timeline_selected_raw), errors="coerce")
+                if pd.notna(ts)
+            }
+        )
+        if _update_chart_filter("cod_month", timeline_selected):
+            st.rerun()
 
 
 st.subheader("Developer Analysis (Top 15)")
@@ -552,7 +703,16 @@ if dev_col and dev_col in filtered_df.columns:
             labels={capacity_col: "Total MW", dev_col: "Developer"},
         )
         dev_mw_fig.update_layout(yaxis={"categoryorder": "total ascending"})
-        dev_col_1.plotly_chart(dev_mw_fig, use_container_width=True)
+        dev_mw_fig.update_layout(clickmode="event+select")
+        dev_mw_event = dev_col_1.plotly_chart(
+            dev_mw_fig,
+            use_container_width=True,
+            key="developer_mw_chart",
+            on_select="rerun",
+        )
+        dev_mw_selected = _selected_values_from_event(dev_mw_event, "y")
+        if _update_chart_filter("developer", dev_mw_selected):
+            st.rerun()
 
     # Top 15 by Count
     dev_count = (
@@ -571,7 +731,16 @@ if dev_col and dev_col in filtered_df.columns:
         labels={"project_count": "Number of Projects", dev_col: "Developer"},
     )
     dev_count_fig.update_layout(yaxis={"categoryorder": "total ascending"})
-    dev_col_2.plotly_chart(dev_count_fig, use_container_width=True)
+    dev_count_fig.update_layout(clickmode="event+select")
+    dev_count_event = dev_col_2.plotly_chart(
+        dev_count_fig,
+        use_container_width=True,
+        key="developer_count_chart",
+        on_select="rerun",
+    )
+    dev_count_selected = _selected_values_from_event(dev_count_event, "y")
+    if _update_chart_filter("developer", dev_count_selected):
+        st.rerun()
 else:
     st.info("No developer column detected for developer analysis.")
 
@@ -597,8 +766,21 @@ if zone_col and zone_col in filtered_df.columns:
             title="Capacity (MW) by Reporting Zone and Fuel",
             labels={capacity_col: "Total MW", zone_col: "Reporting Zone", fuel_col_for_region or "Unknown": "Fuel"},
             barmode="stack",
+            custom_data=[zone_col, fuel_col_for_region or "Unknown"],
         )
-        st.plotly_chart(zone_fig, use_container_width=True)
+        zone_fig.update_layout(clickmode="event+select")
+        zone_event = st.plotly_chart(
+            zone_fig,
+            use_container_width=True,
+            key="zone_chart",
+            on_select="rerun",
+        )
+        zone_selected = _selected_customdata_values(zone_event, 0)
+        if _update_chart_filter("zone", zone_selected):
+            st.rerun()
+        fuel_selected = _selected_customdata_values(zone_event, 1)
+        if _update_chart_filter("fuel", fuel_selected):
+            st.rerun()
     else:
         st.info("Capacity (MW) column missing for regional analysis.")
 else:
