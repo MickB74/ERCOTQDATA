@@ -104,6 +104,7 @@ if current_df is None or current_df.empty:
 
 semantic = infer_semantic_columns(current_df)
 filtered_df = current_df.copy()
+active_filters: list[str] = []
 
 capacity_col = semantic.get("capacity_mw")
 
@@ -147,11 +148,16 @@ with st.sidebar:
         select_all = st.checkbox(f"All {label}", value=True, key=f"all_{semantic_key}")
         if not select_all:
             selected = st.multiselect(f"Select {label}", options=options, default=options)
-            if selected:
+            if selected and set(selected) != set(options):
                 filtered_df = filtered_df[filtered_df[column].astype(str).isin(selected)]
-            else:
+                active_filters.append(label)
+            elif not selected:
                 # If nothing selected and not "Select All", show nothing
-                filtered_df = filtered_df[filtered_df[column].isna()]
+                filtered_df = filtered_df.iloc[0:0]
+                active_filters.append(label)
+            else:
+                # "All" effectively selected, so no filter is applied.
+                pass
 
     if capacity_col and capacity_col in filtered_df.columns:
         numeric_capacity = pd.to_numeric(filtered_df[capacity_col], errors="coerce")
@@ -165,7 +171,9 @@ with st.sidebar:
                     max_value=maximum,
                     value=(minimum, maximum),
                 )
-                filtered_df = filtered_df[numeric_capacity.between(low, high, inclusive="both")]
+                if low > minimum or high < maximum:
+                    filtered_df = filtered_df[numeric_capacity.between(low, high, inclusive="both")]
+                    active_filters.append("Capacity (MW)")
             else:
                 st.caption(f"Capacity: {minimum:,.0f} MW")
 
@@ -179,8 +187,10 @@ with st.sidebar:
                 selected_dates = st.date_input("COD / In-Service Date", (min_date, max_date))
                 if isinstance(selected_dates, (tuple, list)) and len(selected_dates) == 2:
                     start_date, end_date = selected_dates
-                    mask = cod_series.between(pd.Timestamp(start_date), pd.Timestamp(end_date), inclusive="both")
-                    filtered_df = filtered_df[mask]
+                    if start_date > min_date or end_date < max_date:
+                        mask = cod_series.between(pd.Timestamp(start_date), pd.Timestamp(end_date), inclusive="both")
+                        filtered_df = filtered_df[mask]
+                        active_filters.append("COD / In-Service Date")
             else:
                 st.caption(f"COD Date: {min_date}")
 
@@ -199,6 +209,11 @@ else:
 
 pulled_at_text = current_meta.get("pulled_at_utc", "Unknown") if current_meta else "Unknown"
 metric_cols[3].metric("Last Pull (UTC)", _format_timestamp(pulled_at_text))
+
+if active_filters:
+    st.caption("Active filters: " + ", ".join(active_filters))
+else:
+    st.caption("Active filters: none")
 
 if current_meta:
     st.caption(
