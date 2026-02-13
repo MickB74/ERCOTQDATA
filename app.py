@@ -231,6 +231,53 @@ if cod_col and cod_col in filtered_df.columns:
         st.plotly_chart(timeline_fig, use_container_width=True)
 
 
+st.subheader("Developer Analysis (Top 15)")
+dev_col = semantic.get("developer")
+if dev_col and dev_col in filtered_df.columns:
+    dev_col_1, dev_col_2 = st.columns(2)
+
+    # Top 15 by MW
+    if capacity_col and capacity_col in filtered_df.columns:
+        dev_mw = (
+            filtered_df.groupby(dev_col)[capacity_col]
+            .sum()
+            .reset_index()
+            .sort_values(capacity_col, ascending=False)
+            .head(15)
+        )
+        dev_mw_fig = px.bar(
+            dev_mw,
+            x=capacity_col,
+            y=dev_col,
+            orientation="h",
+            title="Top 15 Developers by Capacity (MW)",
+            labels={capacity_col: "Total MW", dev_col: "Developer"},
+        )
+        dev_mw_fig.update_layout(yaxis={"categoryorder": "total ascending"})
+        dev_col_1.plotly_chart(dev_mw_fig, use_container_width=True)
+
+    # Top 15 by Count
+    dev_count = (
+        filtered_df.groupby(dev_col)
+        .size()
+        .reset_index(name="project_count")
+        .sort_values("project_count", ascending=False)
+        .head(15)
+    )
+    dev_count_fig = px.bar(
+        dev_count,
+        x="project_count",
+        y=dev_col,
+        orientation="h",
+        title="Top 15 Developers by Project Count",
+        labels={"project_count": "Number of Projects", dev_col: "Developer"},
+    )
+    dev_count_fig.update_layout(yaxis={"categoryorder": "total ascending"})
+    dev_col_2.plotly_chart(dev_count_fig, use_container_width=True)
+else:
+    st.info("No developer column detected for developer analysis.")
+
+
 st.subheader("Filtered Queue Records")
 st.dataframe(filtered_df, use_container_width=True, height=420)
 st.download_button(
