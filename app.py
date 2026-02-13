@@ -845,6 +845,198 @@ def _render_operating_assets_view() -> None:
     )
 
 
+def _render_power_requests_view(snapshot_df: pd.DataFrame, snapshot_meta: dict[str, Any] | None) -> None:
+    st.subheader("Power Requests")
+    st.caption(
+        "Projects requesting ERCOT interconnection from Project Details tabs (Large Gen + Small Gen) with positive capacity."
+    )
+
+    df = snapshot_df.copy()
+    semantic = infer_semantic_columns(df)
+    df = _apply_crosswalk_columns(df, semantic)
+
+    source_sheet_col = "source_sheet" if "source_sheet" in df.columns else None
+    if source_sheet_col:
+        source_text = df[source_sheet_col].astype("string").str.lower()
+        details_mask = source_text.str.contains("project details - large gen|project details - small gen", na=False)
+        if details_mask.any():
+            df = df[details_mask].copy()
+
+    status_col = semantic.get("status")
+    fuel_col = semantic.get("fuel")
+    technology_col = semantic.get("technology")
+    zone_col = semantic.get("reporting_zone")
+    developer_col = semantic.get("developer")
+    county_col = semantic.get("county")
+    queue_id_col = semantic.get("queue_id")
+    project_name_col = semantic.get("project_name")
+    cod_col = semantic.get("cod_date")
+    capacity_col = semantic.get("capacity_mw")
+
+    fuel_display_col = "fuel_name" if "fuel_name" in df.columns else fuel_col
+    technology_display_col = "technology_name" if "technology_name" in df.columns else technology_col
+
+    if capacity_col and capacity_col in df.columns:
+        df[capacity_col] = pd.to_numeric(df[capacity_col], errors="coerce")
+        df = df[df[capacity_col].fillna(0) > 0].copy()
+
+    filtered_df = df.copy()
+    active_filters: list[str] = []
+    with st.sidebar:
+        st.header("Power Request Filters")
+        filter_defs = [
+            ("Status", status_col, "pr_status"),
+            ("Fuel", fuel_display_col, "pr_fuel"),
+            ("Technology", technology_display_col, "pr_technology"),
+            ("Reporting Zone", zone_col, "pr_zone"),
+            ("Developer", developer_col, "pr_developer"),
+            ("County", county_col, "pr_county"),
+        ]
+
+        for label, column, key in filter_defs:
+            if not column or column not in filtered_df.columns:
+                continue
+            options = sorted(
+                {
+                    str(value)
+                    for value in filtered_df[column].dropna().astype(str)
+                    if str(value).strip()
+                }
+            )
+            if not options:
+                continue
+            selected = st.multiselect(f"Select {label}", options=options, default=options, key=key)
+            if selected and set(selected) != set(options):
+                filtered_df = filtered_df[filtered_df[column].astype(str).isin(selected)]
+                active_filters.append(label)
+
+    metric_cols = st.columns(4)
+    metric_cols[0].metric("Requesting Projects", f"{len(filtered_df):,}")
+    if capacity_col and capacity_col in filtered_df.columns:
+        requested_mw = float(pd.to_numeric(filtered_df[capacity_col], errors="coerce").sum(skipna=True))
+        metric_cols[1].metric("Requested Capacity (MW)", f"{requested_mw:,.0f}")
+    else:
+        metric_cols[1].metric("Requested Capacity (MW)", "n/a")
+
+    if source_sheet_col and source_sheet_col in filtered_df.columns:
+        source_text_filtered = filtered_df[source_sheet_col].astype("string").str.lower()
+        large_count = int(source_text_filtered.str.contains("project details - large gen", na=False).sum())
+        small_count = int(source_text_filtered.str.contains("project details - small gen", na=False).sum())
+        metric_cols[2].metric("Large Gen Requests", f"{large_count:,}")
+        metric_cols[3].metric("Small Gen Requests", f"{small_count:,}")
+    else:
+        metric_cols[2].metric("Large Gen Requests", "n/a")
+        metric_cols[3].metric("Small Gen Requests", "n/a")
+
+    if active_filters:
+        st.caption("Active filters: " + ", ".join(active_filters))
+    else:
+        st.caption("Active filters: none")
+
+    if snapshot_meta:
+        st.caption(
+            f"Source URL: {snapshot_meta.get('source_url', 'n/a')} | "
+            f"Last Pull (UTC): {_format_timestamp(snapshot_meta.get('pulled_at_utc', 'Unknown'))}"
+        )
+
+    chart_col_1, chart_col_2 = st.columns(2)
+    if status_col and status_col in filtered_df.columns:
+        status_plot = (
+            filtered_df.groupby(status_col, dropna=False)
+            .size()
+            .reset_index(name="projects")
+            .sort_values("projects", ascending=False)
+            .head(15)
+        )
+        status_fig = px.bar(status_plot, x=status_col, y="projects", title="Requests by GIM Phase")
+        _style_chart(status_fig)
+        chart_col_1.plotly_chart(status_fig, use_container_width=True)
+    else:
+        chart_col_1.info("Status column not detected.")
+
+    if fuel_display_col and fuel_display_col in filtered_df.columns:
+        if capacity_col and capacity_col in filtered_df.columns:
+            fuel_plot = (
+                filtered_df.groupby(fuel_display_col, dropna=False)[capacity_col]
+                .sum(min_count=1)
+                .reset_index()
+                .sort_values(capacity_col, ascending=False)
+                .head(15)
+            )
+            fuel_fig = px.bar(
+                fuel_plot,
+                x=fuel_display_col,
+                y=capacity_col,
+                title="Requested Capacity by Fuel (MW)",
+                labels={capacity_col: "MW"},
+            )
+        else:
+            fuel_plot = (
+                filtered_df.groupby(fuel_display_col, dropna=False)
+                .size()
+                .reset_index(name="projects")
+                .sort_values("projects", ascending=False)
+                .head(15)
+            )
+            fuel_fig = px.bar(fuel_plot, x=fuel_display_col, y="projects", title="Requests by Fuel")
+        _style_chart(fuel_fig)
+        chart_col_2.plotly_chart(fuel_fig, use_container_width=True)
+    else:
+        chart_col_2.info("Fuel column not detected.")
+
+    if cod_col and cod_col in filtered_df.columns:
+        cod_data = filtered_df.copy()
+        cod_data[cod_col] = pd.to_datetime(cod_data[cod_col], errors="coerce")
+        cod_data = cod_data.dropna(subset=[cod_col])
+        if not cod_data.empty:
+            cod_data["cod_year"] = cod_data[cod_col].dt.year.astype("int64")
+            cod_plot = (
+                cod_data.groupby("cod_year", dropna=False)
+                .size()
+                .reset_index(name="projects")
+                .sort_values("cod_year")
+            )
+            cod_fig = px.bar(
+                cod_plot,
+                x="cod_year",
+                y="projects",
+                title="Requests by Expected COD Year",
+                labels={"cod_year": "Expected COD Year", "projects": "Projects"},
+            )
+            _style_chart(cod_fig, x_tick_angle=0)
+            st.plotly_chart(cod_fig, use_container_width=True)
+
+    st.subheader("Requesting Assets")
+    preferred_columns = [
+        queue_id_col,
+        project_name_col,
+        developer_col,
+        status_col,
+        fuel_display_col,
+        technology_display_col,
+        zone_col,
+        county_col,
+        capacity_col,
+        cod_col,
+        source_sheet_col,
+    ]
+    display_columns: list[str] = []
+    for column in preferred_columns:
+        if column and column in filtered_df.columns and column not in display_columns:
+            display_columns.append(column)
+    for column in filtered_df.columns:
+        if column not in display_columns:
+            display_columns.append(column)
+
+    st.dataframe(filtered_df[display_columns], use_container_width=True, height=420)
+    st.download_button(
+        label="Download Requesting Assets (CSV)",
+        data=filtered_df.to_csv(index=False).encode("utf-8"),
+        file_name="ercot_power_requests.csv",
+        mime="text/csv",
+    )
+
+
 st.set_page_config(
     page_title="ERCOT Interconnection Queue",
     layout="wide",
@@ -875,7 +1067,7 @@ with st.sidebar:
     st.header("App Tab")
     app_view = st.radio(
         "Select View",
-        options=["Interconnection Queue", "Operating Assets"],
+        options=["Interconnection Queue", "Operating Assets", "Power Requests"],
         index=0,
         key="app_view",
     )
@@ -974,6 +1166,10 @@ with st.sidebar:
 current_df, current_meta = load_latest_snapshot()
 if current_df is None or current_df.empty:
     st.info("No snapshot yet. Click `Refresh Data` in the sidebar to pull the first dataset.")
+    st.stop()
+
+if app_view == "Power Requests":
+    _render_power_requests_view(current_df, current_meta)
     st.stop()
 
 snapshot_df = current_df.copy()
