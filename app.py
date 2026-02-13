@@ -673,7 +673,7 @@ st.set_page_config(
 
 ensure_data_dirs()
 
-st.title("ERCOT Interconnection Queue Explorer")
+st.title("ERCOT")
 st.caption(
     "Pull the latest queue data, filter it, visualize it, and track exactly what changed on every refresh."
 )
