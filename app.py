@@ -599,29 +599,61 @@ else:
 
 st.subheader("Projects by Technology")
 if technology_display_col and technology_display_col in filtered_df.columns:
-    technology_plot = (
+    tech_col_1, tech_col_2 = st.columns(2)
+
+    technology_count_plot = (
         filtered_df.groupby(technology_display_col, dropna=False)
         .size()
         .reset_index(name="projects")
         .sort_values("projects", ascending=False)
         .head(20)
     )
-    technology_fig = px.bar(
-        technology_plot,
+    technology_count_fig = px.bar(
+        technology_count_plot,
         x=technology_display_col,
         y="projects",
-        title="Projects by Technology",
+        title="Projects by Technology (Count)",
     )
-    technology_fig.update_layout(clickmode="event+select")
-    technology_event = st.plotly_chart(
-        technology_fig,
+    technology_count_fig.update_layout(clickmode="event+select")
+    technology_count_event = tech_col_1.plotly_chart(
+        technology_count_fig,
         use_container_width=True,
-        key="technology_chart",
+        key="technology_count_chart",
         on_select="rerun",
     )
-    technology_selected = _selected_values_from_event(technology_event, "x")
-    if _update_chart_filter("technology", technology_selected):
+    technology_count_selected = _selected_values_from_event(technology_count_event, "x")
+    if _update_chart_filter("technology", technology_count_selected):
         st.rerun()
+
+    if capacity_col and capacity_col in filtered_df.columns:
+        technology_mw_df = filtered_df.copy()
+        technology_mw_df[capacity_col] = pd.to_numeric(technology_mw_df[capacity_col], errors="coerce")
+        technology_mw_plot = (
+            technology_mw_df.groupby(technology_display_col, dropna=False)[capacity_col]
+            .sum(min_count=1)
+            .reset_index()
+            .sort_values(capacity_col, ascending=False)
+            .head(20)
+        )
+        technology_mw_fig = px.bar(
+            technology_mw_plot,
+            x=technology_display_col,
+            y=capacity_col,
+            title="Capacity by Technology (MW)",
+            labels={capacity_col: "MW"},
+        )
+        technology_mw_fig.update_layout(clickmode="event+select")
+        technology_mw_event = tech_col_2.plotly_chart(
+            technology_mw_fig,
+            use_container_width=True,
+            key="technology_mw_chart",
+            on_select="rerun",
+        )
+        technology_mw_selected = _selected_values_from_event(technology_mw_event, "x")
+        if _update_chart_filter("technology", technology_mw_selected):
+            st.rerun()
+    else:
+        tech_col_2.info("Capacity (MW) column missing for technology MW chart.")
 else:
     st.info("No technology column detected for technology chart.")
 
