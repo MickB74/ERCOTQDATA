@@ -3,12 +3,18 @@ import pandas as pd
 import plotly.express as px
 from datetime import datetime
 from typing import Any
+from urllib.parse import parse_qs, urlparse
 
 # Standardize ercot_queue package access
 try:
     from ercot_queue.config import DEFAULT_DATA_PRODUCT_URLS, MAX_CHANGE_SAMPLE_ROWS
     from ercot_queue.diffing import calculate_diff
-    from ercot_queue.fetcher import fetch_latest_ercot_queue, fetch_summary_under_study_mw
+    from ercot_queue.fetcher import (
+        discover_latest_report_url,
+        discover_report_index_from_product_page,
+        fetch_latest_ercot_queue,
+        fetch_summary_under_study_mw,
+    )
     from ercot_queue.processing import infer_semantic_columns, prepare_queue_dataframe
 except ImportError as exc:
     st.error(f"Critical Package Error: {exc}")
@@ -19,11 +25,6 @@ from ercot_queue.store import (
     load_latest_snapshot,
     load_snapshot_history,
     save_snapshot,
-)
-from ercot_queue.validation import (
-    INTERCONNECTION_FYI_ERCOT_URL,
-    compare_local_to_external,
-    fetch_interconnection_fyi_ercot,
 )
 
 FUEL_CODE_MAP = {
@@ -65,11 +66,6 @@ def _format_timestamp(raw_ts: str) -> str:
         return parsed.strftime("%Y-%m-%d %H:%M UTC")
     except ValueError:
         return raw_ts
-
-
-@st.cache_data(ttl=60 * 30, show_spinner=False)
-def _cached_fetch_external_validation(url: str) -> tuple[pd.DataFrame, dict]:
-    return fetch_interconnection_fyi_ercot(url)
 
 
 @st.cache_data(ttl=60 * 30, show_spinner=False)
@@ -220,6 +216,46 @@ def _update_chart_filter(filter_key: str, values: list[str]) -> bool:
     return True
 
 
+def _style_chart(fig: Any, *, x_tick_angle: int = -30, height: int = 380) -> None:
+    fig.update_layout(
+        height=height,
+        margin=dict(l=8, r=8, t=56, b=8),
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1.0),
+    )
+    fig.update_xaxes(tickangle=x_tick_angle, automargin=True)
+    fig.update_yaxes(automargin=True)
+
+
+def _source_identity(source_url: str | None) -> str:
+    if not source_url:
+        return ""
+
+    parsed = urlparse(str(source_url))
+    params = parse_qs(parsed.query)
+    for key, values in params.items():
+        if key.lower() == "doclookupid" and values:
+            return f"doclookupid:{values[0]}"
+
+    normalized_path = parsed.path.rstrip("/")
+    normalized_query = parsed.query.strip()
+    return f"{normalized_path}?{normalized_query}".lower()
+
+
+def _resolve_latest_source_url(user_url: str) -> str:
+    text = user_url.strip()
+    if not text:
+        raise ValueError("Missing source URL")
+
+    if "data-product-details" in text:
+        index_url, _ = discover_report_index_from_product_page(text)
+        return discover_latest_report_url(index_url)
+
+    if "GetReports.do" in text and "reportTypeId" in text:
+        return discover_latest_report_url(text)
+
+    return text
+
+
 st.set_page_config(
     page_title="ERCOT Interconnection Queue",
     layout="wide",
@@ -230,6 +266,20 @@ ensure_data_dirs()
 st.title("ERCOT Interconnection Queue Explorer")
 st.caption(
     "Pull the latest queue data, filter it, visualize it, and track exactly what changed on every refresh."
+)
+st.markdown(
+    """
+<style>
+  .block-container {padding-top: 1.3rem; padding-bottom: 2.2rem;}
+  [data-testid="stMetric"] {
+    background: rgba(148, 163, 184, 0.08);
+    border: 1px solid rgba(148, 163, 184, 0.22);
+    border-radius: 12px;
+    padding: 0.8rem 0.9rem;
+  }
+</style>
+""",
+    unsafe_allow_html=True,
 )
 
 
@@ -251,31 +301,72 @@ with st.sidebar:
     st.caption("Primary source: https://www.ercot.com/mp/data-products/data-product-details?id=pg7-200-er")
 
     if st.button("Refresh Data", type="primary", use_container_width=True):
-        with st.spinner("Fetching and diffing latest data..."):
-            previous_df, _ = load_latest_snapshot()
-            latest_raw_df, source_meta = fetch_latest_ercot_queue(custom_url or None)
-            latest_prepared_df = prepare_queue_dataframe(latest_raw_df)
-            diff_report = calculate_diff(
-                previous_df,
-                latest_prepared_df,
-                max_sample_rows=MAX_CHANGE_SAMPLE_ROWS,
-            )
-            latest_meta = save_snapshot(
-                latest_prepared_df,
-                source_metadata=source_meta,
-                diff_report=diff_report,
+        with st.spinner("Checking for a new ERCOT spreadsheet..."):
+            previous_df, previous_meta = load_latest_snapshot()
+            previous_source_url = (previous_meta or {}).get("source_url")
+            expected_latest_url: str | None = None
+            source_to_check = custom_url or default_source_url
+
+            if source_to_check:
+                try:
+                    expected_latest_url = _resolve_latest_source_url(source_to_check)
+                except Exception:
+                    expected_latest_url = None
+
+            already_current = (
+                previous_meta is not None
+                and expected_latest_url is not None
+                and _source_identity(expected_latest_url) == _source_identity(previous_source_url)
             )
 
-        st.session_state["last_refresh"] = {
-            "snapshot_id": latest_meta["snapshot_id"],
-            "summary": diff_report.get("summary", {}),
-        }
-        st.success(
-            "Refresh complete. "
-            f"Added {diff_report['summary']['added']}, "
-            f"Removed {diff_report['summary']['removed']}, "
-            f"Changed {diff_report['summary']['changed']}."
-        )
+            if already_current:
+                st.session_state["refresh_notice"] = (
+                    "No new ERCOT spreadsheet was found. "
+                    f"Using existing snapshot {previous_meta.get('snapshot_id', 'n/a')}."
+                )
+            else:
+                latest_raw_df, source_meta = fetch_latest_ercot_queue(custom_url or None)
+                latest_source_url = source_meta.get("source_url")
+                same_file_after_fetch = (
+                    previous_meta is not None
+                    and _source_identity(str(latest_source_url or "")) == _source_identity(previous_source_url)
+                )
+
+                if same_file_after_fetch:
+                    st.session_state["refresh_notice"] = (
+                        "No new ERCOT spreadsheet was found. "
+                        f"Using existing snapshot {previous_meta.get('snapshot_id', 'n/a')}."
+                    )
+                else:
+                    latest_prepared_df = prepare_queue_dataframe(latest_raw_df)
+                    diff_report = calculate_diff(
+                        previous_df,
+                        latest_prepared_df,
+                        max_sample_rows=MAX_CHANGE_SAMPLE_ROWS,
+                    )
+                    latest_meta = save_snapshot(
+                        latest_prepared_df,
+                        source_metadata=source_meta,
+                        diff_report=diff_report,
+                    )
+
+                    st.session_state["last_refresh"] = {
+                        "snapshot_id": latest_meta["snapshot_id"],
+                        "summary": diff_report.get("summary", {}),
+                    }
+                    st.session_state["refresh_notice"] = (
+                        "Refresh complete. "
+                        f"Added {diff_report['summary']['added']}, "
+                        f"Removed {diff_report['summary']['removed']}, "
+                        f"Changed {diff_report['summary']['changed']}."
+                    )
+
+        notice = st.session_state.get("refresh_notice")
+        if notice:
+            if notice.startswith("Refresh complete"):
+                st.success(notice)
+            else:
+                st.info(notice)
 
 
 current_df, current_meta = load_latest_snapshot()
@@ -540,12 +631,12 @@ if current_meta:
         f"Report Type ID: {current_meta.get('report_type_id', 'n/a')} | "
         f"Tabs Processed: {current_meta.get('tab_count', 'n/a')}"
     )
-    st.caption(f"Data Product URL: {current_meta.get('data_product_url', 'n/a')}")
-    st.caption(f"Latest GIS URL: {current_meta.get('source_url', 'n/a')}")
-    tabs_processed = current_meta.get("tabs_processed")
-    if isinstance(tabs_processed, list) and tabs_processed:
-        with st.expander("Tabs Processed In Latest Pull", expanded=False):
-            st.write(", ".join(tabs_processed))
+    with st.expander("Source Details", expanded=False):
+        st.write(f"Data Product URL: {current_meta.get('data_product_url', 'n/a')}")
+        st.write(f"Latest GIS URL: {current_meta.get('source_url', 'n/a')}")
+        tabs_processed = current_meta.get("tabs_processed")
+        if isinstance(tabs_processed, list) and tabs_processed:
+            st.write("Tabs Processed: " + ", ".join(tabs_processed))
 
 st.subheader("Fuel and Technology Mix")
 chart_col_1, chart_col_2 = st.columns(2)
@@ -560,7 +651,8 @@ if fuel_display_col and fuel_display_col in filtered_df.columns:
     )
     fuel_fig = px.bar(fuel_plot, x=fuel_display_col, y="projects", title="Projects by Fuel")
     fuel_fig.update_layout(clickmode="event+select")
-    fuel_event = chart_col_2.plotly_chart(
+    _style_chart(fuel_fig)
+    fuel_event = chart_col_1.plotly_chart(
         fuel_fig,
         use_container_width=True,
         key="fuel_chart",
@@ -587,6 +679,7 @@ if technology_display_col and technology_display_col in filtered_df.columns:
         title="Projects by Technology (Count)",
     )
     technology_count_fig.update_layout(clickmode="event+select")
+    _style_chart(technology_count_fig)
     technology_count_event = chart_col_2.plotly_chart(
         technology_count_fig,
         use_container_width=True,
@@ -619,6 +712,7 @@ if technology_display_col and technology_display_col in filtered_df.columns:
             labels={capacity_col: "MW"},
         )
         technology_mw_fig.update_layout(clickmode="event+select")
+        _style_chart(technology_mw_fig)
         technology_mw_event = st.plotly_chart(
             technology_mw_fig,
             use_container_width=True,
@@ -668,6 +762,7 @@ if cod_col and cod_col in filtered_df.columns:
                 hover_data={"projects": True},
             )
             cod_mw_fig.update_layout(clickmode="event+select")
+            _style_chart(cod_mw_fig, x_tick_angle=0)
             cod_mw_event = cod_col_1.plotly_chart(
                 cod_mw_fig,
                 use_container_width=True,
@@ -687,6 +782,7 @@ if cod_col and cod_col in filtered_df.columns:
                 hover_data={capacity_col: ":,.2f"},
             )
             cod_count_fig.update_layout(clickmode="event+select")
+            _style_chart(cod_count_fig, x_tick_angle=0)
             cod_count_event = cod_col_2.plotly_chart(
                 cod_count_fig,
                 use_container_width=True,
@@ -713,6 +809,7 @@ if cod_col and cod_col in filtered_df.columns:
                 labels={"projects": "Projects", "cod_year": "Expected COD Year"},
             )
             cod_count_fig.update_layout(clickmode="event+select")
+            _style_chart(cod_count_fig, x_tick_angle=0)
             cod_count_event = st.plotly_chart(
                 cod_count_fig,
                 use_container_width=True,
@@ -732,6 +829,7 @@ if cod_col and cod_col in filtered_df.columns:
             )
 
         timeline_fig.update_layout(clickmode="event+select")
+        _style_chart(timeline_fig, x_tick_angle=0)
         timeline_event = st.plotly_chart(
             timeline_fig,
             use_container_width=True,
@@ -767,6 +865,7 @@ if dev_col and dev_col in filtered_df.columns:
         )
         dev_mw_fig.update_layout(yaxis={"categoryorder": "total ascending"})
         dev_mw_fig.update_layout(clickmode="event+select")
+        _style_chart(dev_mw_fig, x_tick_angle=0)
         dev_mw_event = dev_col_1.plotly_chart(
             dev_mw_fig,
             use_container_width=True,
@@ -795,6 +894,7 @@ if dev_col and dev_col in filtered_df.columns:
     )
     dev_count_fig.update_layout(yaxis={"categoryorder": "total ascending"})
     dev_count_fig.update_layout(clickmode="event+select")
+    _style_chart(dev_count_fig, x_tick_angle=0)
     dev_count_event = dev_col_2.plotly_chart(
         dev_count_fig,
         use_container_width=True,
@@ -832,6 +932,7 @@ if zone_col and zone_col in filtered_df.columns:
             custom_data=[zone_col, fuel_col_for_region or "Unknown"],
         )
         zone_fig.update_layout(clickmode="event+select")
+        _style_chart(zone_fig)
         zone_event = st.plotly_chart(
             zone_fig,
             use_container_width=True,
@@ -931,154 +1032,3 @@ if history:
     st.dataframe(history_df[show_cols], use_container_width=True, height=280)
 else:
     st.write("No snapshot history available yet.")
-
-
-st.subheader("External Validation (Interconnection.fyi)")
-st.caption(
-    "Cross-check this snapshot against an independent source and highlight queue ID, status, and capacity mismatches."
-)
-
-validation_col_1, validation_col_2 = st.columns([3, 1])
-with validation_col_1:
-    validation_url = st.text_input(
-        "Validation Source URL",
-        value=INTERCONNECTION_FYI_ERCOT_URL,
-        help="Independent source used for queue cross-checking.",
-    ).strip()
-with validation_col_2:
-    run_validation = st.button("Run External Validation", use_container_width=True)
-    if st.button("Clear Validation Results", use_container_width=True):
-        if "external_validation" in st.session_state:
-            del st.session_state["external_validation"]
-        st.rerun()
-
-if run_validation:
-    try:
-        with st.spinner("Fetching external source and comparing queue IDs..."):
-            external_df, external_meta = _cached_fetch_external_validation(validation_url)
-            validation_result = compare_local_to_external(
-                current_df,
-                external_df,
-                local_queue_col=semantic.get("queue_id"),
-                local_status_col=semantic.get("status"),
-                local_capacity_col=semantic.get("capacity_mw"),
-            )
-        st.session_state["external_validation"] = {
-            "ran_at_utc": datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
-            "source_meta": external_meta,
-            "result": validation_result,
-        }
-        st.success(
-            "Validation complete. "
-            f"Matched {validation_result['summary']['matched_queue_ids']} queue IDs; "
-            f"missing local: {validation_result['summary']['missing_in_local']}, "
-            f"missing external: {validation_result['summary']['missing_in_external']}."
-        )
-    except Exception as exc:  # pylint: disable=broad-except
-        st.error(f"External validation failed: {exc}")
-
-validation_state = st.session_state.get("external_validation")
-if isinstance(validation_state, dict):
-    val_res = validation_state.get("result", {})
-    summary = val_res.get("summary", {})
-    source_meta = validation_state.get("source_meta", {})
-    
-    # Only show if we have a valid summary structure
-    if isinstance(summary, dict) and summary:
-        st.caption(
-            f"Last validation run: {validation_state.get('ran_at_utc', 'unknown')} UTC | "
-            f"Parser: {source_meta.get('parser', 'unknown')} | "
-            f"Source: {source_meta.get('source_url', validation_url)}"
-        )
-
-    # Collect all unique statuses for filtering
-    all_statuses = set()
-    for df_key in ["missing_in_local", "missing_in_external", "status_mismatches", "capacity_mismatches"]:
-        df = val_res.get(df_key)
-        if isinstance(df, pd.DataFrame) and not df.empty:
-            for col in ["status", "local_status", "external_status"]:
-                if col in df.columns:
-                    all_statuses.update(df[col].dropna().unique())
-    
-    sorted_statuses = sorted(list(all_statuses))
-    
-    st.markdown("---")
-    val_filter_col1, val_filter_col2 = st.columns([1, 2])
-    with val_filter_col1:
-        st.write("**Filter Results by Status**")
-        select_all_val = st.checkbox("All Statuses", value=True, key="val_status_all")
-    with val_filter_col2:
-        if select_all_val:
-            selected_val_statuses = sorted_statuses
-            st.multiselect("Statuses", options=sorted_statuses, default=sorted_statuses, disabled=True, key="val_status_sel_all")
-        else:
-            selected_val_statuses = st.multiselect("Select Statuses", options=sorted_statuses, default=sorted_statuses, key="val_status_sel")
-
-    # Filter DataFrames
-    def filter_val_df(df, statuses):
-        if df is None or df.empty:
-            return df
-        mask = pd.Series(False, index=df.index)
-        for col in ["status", "local_status", "external_status"]:
-            if col in df.columns:
-                mask |= df[col].isin(statuses)
-        return df[mask]
-
-    missing_in_local_df = filter_val_df(val_res["missing_in_local"], selected_val_statuses)
-    missing_in_external_df = filter_val_df(val_res["missing_in_external"], selected_val_statuses)
-    status_mismatch_df = filter_val_df(val_res["status_mismatches"], selected_val_statuses)
-    capacity_mismatch_df = filter_val_df(val_res["capacity_mismatches"], selected_val_statuses)
-
-    # Recalculate Summary for metrics (based on filtered DataFrames)
-    filtered_summary = {
-        "local_queue_ids": len(missing_in_external_df) + (summary.get("matched_queue_ids", 0) if select_all_val else 0), # This is approximate if not all matched are shown
-        "external_queue_ids": len(missing_in_local_df) + (summary.get("matched_queue_ids", 0) if select_all_val else 0),
-        "matched_queue_ids": summary.get("matched_queue_ids", 0) if select_all_val else "n/a",
-        "missing_in_local": len(missing_in_local_df),
-        "missing_in_external": len(missing_in_external_df),
-        "status_mismatches": len(status_mismatch_df),
-        "capacity_mismatches": len(capacity_mismatch_df),
-        "missing_in_local_mw": missing_in_local_df["capacity_mw"].sum() if "capacity_mw" in missing_in_local_df.columns else 0,
-        "missing_in_external_mw": missing_in_external_df["capacity_mw"].sum() if "capacity_mw" in missing_in_external_df.columns else 0,
-        "status_mismatch_mw": status_mismatch_df["local_capacity_mw"].sum() if "local_capacity_mw" in status_mismatch_df.columns else (status_mismatch_df["capacity_mw"].sum() if "capacity_mw" in status_mismatch_df.columns else 0),
-        "capacity_mismatch_mw": capacity_mismatch_df["local_capacity_mw"].sum() if "local_capacity_mw" in capacity_mismatch_df.columns else 0,
-    }
-    # Note: matched_mw and overall totals are hard to filter perfectly without re-running the comparison or having more data.
-    # We will focus on the mismatch metrics which are most relevant for filtering.
-
-    st.markdown("##### Filtered Mismatch Metrics")
-    val_metrics_ids = st.columns(4)
-    val_metrics_ids[0].metric("Missing Local", f"{filtered_summary['missing_in_local']:,}")
-    val_metrics_ids[1].metric("Missing External", f"{filtered_summary['missing_in_external']:,}")
-    val_metrics_ids[2].metric("Status Mismatches", f"{filtered_summary['status_mismatches']:,}")
-    val_metrics_ids[3].metric("Capacity Mismatches", f"{filtered_summary['capacity_mismatches']:,}")
-
-    val_metrics_mw = st.columns(4)
-    val_metrics_mw[0].metric("Missing Local MW", f"{filtered_summary['missing_in_local_mw']:,.0f}")
-    val_metrics_mw[1].metric("Missing External MW", f"{filtered_summary['missing_in_external_mw']:,.0f}")
-    val_metrics_mw[2].metric("Status Mismatch MW", f"{filtered_summary['status_mismatch_mw']:,.0f}")
-    val_metrics_mw[3].metric("Capacity Mismatch MW", f"{filtered_summary['capacity_mismatch_mw']:,.0f}")
-
-    with st.expander("Queue IDs Missing In Local Snapshot", expanded=False):
-        if not missing_in_local_df.empty:
-            st.dataframe(missing_in_local_df, use_container_width=True)
-        else:
-            st.write("No missing queue IDs in local snapshot (for selected statuses).")
-
-    with st.expander("Queue IDs Missing In External Source", expanded=False):
-        if not missing_in_external_df.empty:
-            st.dataframe(missing_in_external_df, use_container_width=True)
-        else:
-            st.write("No missing queue IDs in external source (for selected statuses).")
-
-    with st.expander("Status Mismatches", expanded=False):
-        if not status_mismatch_df.empty:
-            st.dataframe(status_mismatch_df, use_container_width=True)
-        else:
-            st.write("No status mismatches detected (for selected statuses).")
-
-    with st.expander("Capacity Mismatches (MW)", expanded=False):
-        if not capacity_mismatch_df.empty:
-            st.dataframe(capacity_mismatch_df, use_container_width=True)
-        else:
-            st.write("No capacity mismatches above tolerance (for selected statuses).")
