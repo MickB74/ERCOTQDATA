@@ -47,6 +47,8 @@ MONTH_TO_INT = {
 }
 MAX_HEADER_SCAN_ROWS = 60
 DEFAULT_OPERATING_ASSETS_INDEX_URL = "https://www.ercot.com/gridinfo/resource"
+DEFAULT_LARGE_LOAD_OVERVIEW_URL = "https://www.ercot.com/committees/board"
+DEFAULT_LARGE_LOAD_INTEGRATION_URL = "https://www.ercot.com/services/rq/large-load-integration"
 
 
 def fetch_latest_ercot_queue(custom_url: str | None = None) -> tuple[pd.DataFrame, dict[str, Any]]:
@@ -159,6 +161,233 @@ def fetch_latest_operating_assets(index_url: str | None = None) -> tuple[pd.Data
         **summary_totals,
     }
     return cleaned, meta
+
+
+def fetch_large_load_requests_overview(
+    index_url: str | None = None,
+    *,
+    history_limit: int = 12,
+) -> dict[str, Any]:
+    """Fetch large-load request metrics from ERCOT Monthly Operational Overview PDFs."""
+    board_url = (index_url or DEFAULT_LARGE_LOAD_OVERVIEW_URL).strip()
+    _assert_ercot_url(board_url, "ERCOT board URL")
+
+    reports = discover_monthly_operational_overview_reports(board_url)
+    if not reports:
+        raise RuntimeError(f"No Monthly Operational Overview PDFs found on page: {board_url}")
+
+    usable_limit = max(1, min(int(history_limit), 36))
+    history_rows: list[dict[str, Any]] = []
+    latest_report = reports[0]
+
+    for report in reports[:usable_limit]:
+        row = {
+            "report_label": report["label"],
+            "report_url": report["url"],
+            "report_month": report.get("report_month"),
+            "posted_date": report.get("posted_date"),
+            "combined_large_load_queue_and_approved_mw": None,
+            "current_large_load_interconnection_queue_mw": None,
+            "loads_approved_to_energize_mw": None,
+            "parse_warning": None,
+        }
+        try:
+            pdf_bytes, _, _ = _fetch_url(str(report["url"]))
+            metrics = _extract_large_load_metrics_from_pdf(pdf_bytes)
+            row.update(metrics)
+        except Exception as exc:  # pylint: disable=broad-except
+            row["parse_warning"] = str(exc)
+
+        history_rows.append(row)
+
+    latest_metrics = history_rows[0] if history_rows else {}
+    return {
+        "source": "ercot_monthly_operational_overview",
+        "index_url": board_url,
+        "integration_url": DEFAULT_LARGE_LOAD_INTEGRATION_URL,
+        "latest_report_url": latest_report["url"],
+        "latest_report_label": latest_report["label"],
+        "latest_report_month": latest_report.get("report_month"),
+        "latest_posted_date": latest_report.get("posted_date"),
+        "latest_metrics": latest_metrics,
+        "history": history_rows,
+    }
+
+
+def discover_monthly_operational_overview_reports(index_url: str) -> list[dict[str, Any]]:
+    content, _, effective_url = _fetch_url(index_url)
+    html_text = content.decode("utf-8", errors="ignore")
+    soup = BeautifulSoup(html_text, "html.parser")
+
+    candidates: list[dict[str, Any]] = []
+    seen_urls: set[str] = set()
+    position = 0
+
+    for anchor in soup.find_all("a"):
+        href = (anchor.get("href") or "").strip()
+        if not href:
+            continue
+
+        abs_url = urljoin(effective_url, href)
+        if not _is_ercot_url(abs_url):
+            continue
+        if not abs_url.lower().endswith(".pdf"):
+            continue
+
+        label = " ".join(anchor.get_text(" ", strip=True).split())
+        parent_text = " ".join(anchor.parent.get_text(" ", strip=True).split()) if anchor.parent else ""
+        combined_text = f"{label} {parent_text} {abs_url}".lower()
+        if "monthly operational overview" not in combined_text:
+            continue
+        if abs_url in seen_urls:
+            continue
+        seen_urls.add(abs_url)
+
+        report_month_dt = _parse_report_month(f"{label} {parent_text} {abs_url}")
+        posted_dt = _parse_date(parent_text) or _parse_date(label) or _parse_date(abs_url) or datetime.min
+        score = 0
+        if "monthly operational overview" in (label or "").lower():
+            score += 8
+        if "ercot-monthly-operational-overview" in abs_url.lower():
+            score += 5
+
+        candidates.append(
+            {
+                "url": abs_url,
+                "label": label or "Monthly Operational Overview",
+                "report_month_dt": report_month_dt,
+                "posted_dt": posted_dt,
+                "score": score,
+                "position": position,
+            }
+        )
+        position += 1
+
+    candidates.sort(
+        key=lambda item: (
+            item["report_month_dt"] or datetime.min,
+            item["posted_dt"],
+            item["score"],
+            -item["position"],
+        ),
+        reverse=True,
+    )
+
+    results: list[dict[str, Any]] = []
+    for candidate in candidates:
+        report_month_dt = candidate.get("report_month_dt")
+        posted_dt = candidate.get("posted_dt")
+        results.append(
+            {
+                "url": candidate["url"],
+                "label": candidate["label"],
+                "report_month": report_month_dt.strftime("%Y-%m") if isinstance(report_month_dt, datetime) else None,
+                "posted_date": posted_dt.strftime("%Y-%m-%d") if isinstance(posted_dt, datetime) and posted_dt != datetime.min else None,
+            }
+        )
+
+    return results
+
+
+def _parse_report_month(value: str) -> datetime | None:
+    month_match = MONTH_NAME_PATTERN.search(value)
+    if not month_match:
+        return None
+    month_name, year_text = month_match.groups()
+    month = MONTH_TO_INT.get(month_name[:3].lower())
+    if not month:
+        return None
+    try:
+        return datetime(int(year_text), month, 1)
+    except ValueError:
+        return None
+
+
+def _extract_large_load_metrics_from_pdf(pdf_bytes: bytes) -> dict[str, float | None]:
+    text = _extract_pdf_text(pdf_bytes)
+    if not text:
+        return {
+            "combined_large_load_queue_and_approved_mw": None,
+            "current_large_load_interconnection_queue_mw": None,
+            "loads_approved_to_energize_mw": None,
+        }
+
+    normalized = re.sub(r"\s+", " ", text).strip()
+    combined = _extract_metric_from_text(
+        normalized,
+        [
+            r"current\s+large\s+load\s+interconnection\s+queue\s*\+\s*loads\s+approved\s+to\s+energize\s*\(mw\)\s*([0-9][0-9,]*(?:\.[0-9]+)?)",
+            r"current\s+large\s+load\s+interconnection\s+queue\s+and\s+loads\s+approved\s+to\s+energize\s*\(mw\)\s*([0-9][0-9,]*(?:\.[0-9]+)?)",
+        ],
+    )
+    queue = _extract_metric_from_text(
+        normalized,
+        [
+            r"current\s+large\s+load\s+interconnection\s+queue\s*\(mw\)\s*([0-9][0-9,]*(?:\.[0-9]+)?)",
+        ],
+    )
+    approved = _extract_metric_from_text(
+        normalized,
+        [
+            r"loads\s+approved\s+to\s+energize\s*\(mw\)\s*([0-9][0-9,]*(?:\.[0-9]+)?)",
+            r"loads\s+approved\s+for\s+energization\s*\(mw\)\s*([0-9][0-9,]*(?:\.[0-9]+)?)",
+        ],
+    )
+    if combined is None and queue is not None and approved is not None:
+        combined = queue + approved
+
+    return {
+        "combined_large_load_queue_and_approved_mw": combined,
+        "current_large_load_interconnection_queue_mw": queue,
+        "loads_approved_to_energize_mw": approved,
+    }
+
+
+def _extract_metric_from_text(text: str, patterns: list[str]) -> float | None:
+    values: list[float] = []
+    for pattern in patterns:
+        matches = re.findall(pattern, text, flags=re.IGNORECASE)
+        for match in matches:
+            numeric = _parse_number_text(match)
+            if numeric is not None:
+                values.append(numeric)
+    if not values:
+        return None
+    return max(values)
+
+
+def _parse_number_text(value: Any) -> float | None:
+    if value is None:
+        return None
+    text = str(value).strip().replace(",", "")
+    if not text:
+        return None
+    try:
+        return float(text)
+    except ValueError:
+        return None
+
+
+def _extract_pdf_text(pdf_bytes: bytes) -> str:
+    try:
+        import pypdf
+    except Exception:
+        return ""
+
+    try:
+        reader = pypdf.PdfReader(io.BytesIO(pdf_bytes))
+    except Exception:
+        return ""
+
+    parts: list[str] = []
+    for page in reader.pages:
+        try:
+            text = page.extract_text() or ""
+        except Exception:
+            text = ""
+        if text:
+            parts.append(text)
+    return "\n".join(parts)
 
 
 def discover_latest_mora_workbook_url(index_url: str) -> tuple[str, str]:

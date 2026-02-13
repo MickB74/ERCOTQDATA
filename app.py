@@ -11,7 +11,9 @@ try:
     from ercot_queue.config import DEFAULT_DATA_PRODUCT_URLS, MAX_CHANGE_SAMPLE_ROWS
     from ercot_queue.diffing import calculate_diff
     from ercot_queue.fetcher import (
+        DEFAULT_LARGE_LOAD_OVERVIEW_URL,
         DEFAULT_OPERATING_ASSETS_INDEX_URL,
+        fetch_large_load_requests_overview,
         discover_latest_report_url,
         discover_latest_mora_workbook_url,
         discover_report_index_from_product_page,
@@ -80,6 +82,11 @@ def _cached_fetch_under_study_capacity(source_url: str) -> float | None:
 @st.cache_data(ttl=60 * 30, show_spinner=False)
 def _cached_fetch_operating_assets(index_url: str) -> tuple[pd.DataFrame, dict]:
     return fetch_latest_operating_assets(index_url)
+
+
+@st.cache_data(ttl=60 * 60 * 6, show_spinner=False)
+def _cached_fetch_large_load_overview(index_url: str, history_limit: int) -> dict:
+    return fetch_large_load_requests_overview(index_url, history_limit=history_limit)
 
 
 def _map_code_to_name(value: object, crosswalk: dict[str, str]) -> str | None:
@@ -845,6 +852,171 @@ def _render_operating_assets_view() -> None:
     )
 
 
+def _render_large_load_requests_view() -> None:
+    st.subheader("Large Load Requests (Data Centers / Offices)")
+    st.caption("Source: ERCOT Monthly Operational Overview files posted on ERCOT Board pages.")
+
+    with st.sidebar:
+        st.header("Large Load Source")
+        large_load_index_url = st.text_input(
+            "ERCOT Monthly Operational Overview URL",
+            value=st.session_state.get("large_load_index_url", DEFAULT_LARGE_LOAD_OVERVIEW_URL),
+            help="ERCOT page that lists Monthly Operational Overview PDFs.",
+        ).strip()
+        st.session_state["large_load_index_url"] = large_load_index_url
+        history_limit = int(
+            st.slider(
+                "History Points",
+                min_value=3,
+                max_value=24,
+                value=int(st.session_state.get("large_load_history_limit", 12)),
+                key="large_load_history_limit",
+            )
+        )
+        if st.button("Refresh Large Load Data", use_container_width=True):
+            _cached_fetch_large_load_overview.clear()
+            st.session_state["large_load_refreshed_at"] = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+
+    try:
+        overview = _cached_fetch_large_load_overview(large_load_index_url, history_limit)
+    except Exception as exc:  # pylint: disable=broad-except
+        st.error(f"Could not load large load request data from ERCOT: {exc}")
+        return
+
+    latest = overview.get("latest_metrics", {}) if isinstance(overview, dict) else {}
+    combined_mw = latest.get("combined_large_load_queue_and_approved_mw")
+    queue_mw = latest.get("current_large_load_interconnection_queue_mw")
+    approved_mw = latest.get("loads_approved_to_energize_mw")
+
+    metric_cols = st.columns(4)
+    metric_cols[0].metric(
+        "Latest Report Month",
+        str(overview.get("latest_report_month", "n/a") or "n/a"),
+    )
+    metric_cols[1].metric(
+        "Queue + Approved (MW)",
+        f"{float(combined_mw):,.0f}" if isinstance(combined_mw, (int, float)) else "n/a",
+    )
+    metric_cols[2].metric(
+        "Queue Only (MW)",
+        f"{float(queue_mw):,.0f}" if isinstance(queue_mw, (int, float)) else "n/a",
+    )
+    metric_cols[3].metric(
+        "Approved to Energize (MW)",
+        f"{float(approved_mw):,.0f}" if isinstance(approved_mw, (int, float)) else "n/a",
+    )
+
+    latest_report_url = str(overview.get("latest_report_url", "") or "")
+    integration_url = str(overview.get("integration_url", "") or "")
+    if latest_report_url:
+        st.markdown(f"Latest Monthly Operational Overview: [{latest_report_url}]({latest_report_url})")
+    if integration_url:
+        st.markdown(f"Large Load Integration page: [{integration_url}]({integration_url})")
+
+    refreshed_at = st.session_state.get("large_load_refreshed_at")
+    if refreshed_at:
+        st.caption(f"Last manual refresh check (UTC): {refreshed_at}")
+
+    history = overview.get("history", []) if isinstance(overview, dict) else []
+    history_df = pd.DataFrame(history)
+    if history_df.empty:
+        st.info("No Monthly Operational Overview history rows were parsed.")
+        return
+
+    for column in (
+        "combined_large_load_queue_and_approved_mw",
+        "current_large_load_interconnection_queue_mw",
+        "loads_approved_to_energize_mw",
+    ):
+        if column in history_df.columns:
+            history_df[column] = pd.to_numeric(history_df[column], errors="coerce")
+
+    if "report_month" in history_df.columns:
+        report_month_dt = pd.to_datetime(history_df["report_month"], errors="coerce")
+        history_df = history_df.assign(_report_month_dt=report_month_dt).sort_values("_report_month_dt")
+    elif "posted_date" in history_df.columns:
+        posted_dt = pd.to_datetime(history_df["posted_date"], errors="coerce")
+        history_df = history_df.assign(_report_month_dt=posted_dt).sort_values("_report_month_dt")
+    else:
+        history_df = history_df.assign(_report_month_dt=pd.NaT)
+
+    st.subheader("Large Load Trend")
+    trend_cols = st.columns(2)
+    if (
+        "report_month" in history_df.columns
+        and "combined_large_load_queue_and_approved_mw" in history_df.columns
+        and history_df["combined_large_load_queue_and_approved_mw"].notna().any()
+    ):
+        combined_plot = history_df.dropna(subset=["combined_large_load_queue_and_approved_mw"]).copy()
+        combined_fig = px.bar(
+            combined_plot,
+            x="report_month",
+            y="combined_large_load_queue_and_approved_mw",
+            title="Current Large Load Queue + Approved to Energize (MW)",
+            labels={
+                "report_month": "Report Month",
+                "combined_large_load_queue_and_approved_mw": "MW",
+            },
+        )
+        _style_chart(combined_fig, x_tick_angle=0)
+        trend_cols[0].plotly_chart(combined_fig, use_container_width=True)
+    else:
+        trend_cols[0].info("Combined MW metric could not be extracted from the available reports.")
+
+    component_rows = []
+    for _, row in history_df.iterrows():
+        report_month = row.get("report_month")
+        queue_value = row.get("current_large_load_interconnection_queue_mw")
+        approved_value = row.get("loads_approved_to_energize_mw")
+        if pd.notna(queue_value):
+            component_rows.append(
+                {"report_month": report_month, "metric": "Queue Only (MW)", "mw": float(queue_value)}
+            )
+        if pd.notna(approved_value):
+            component_rows.append(
+                {"report_month": report_month, "metric": "Approved to Energize (MW)", "mw": float(approved_value)}
+            )
+
+    component_df = pd.DataFrame(component_rows)
+    if not component_df.empty:
+        component_fig = px.line(
+            component_df,
+            x="report_month",
+            y="mw",
+            color="metric",
+            markers=True,
+            title="Queue vs Approved Components (MW)",
+            labels={"report_month": "Report Month", "mw": "MW", "metric": "Series"},
+        )
+        _style_chart(component_fig, x_tick_angle=0)
+        trend_cols[1].plotly_chart(component_fig, use_container_width=True)
+    else:
+        trend_cols[1].info("Queue-only and approved-only components were not found in report text.")
+
+    st.subheader("Parsed Monthly Reports")
+    display_columns = [
+        column
+        for column in [
+            "report_month",
+            "posted_date",
+            "combined_large_load_queue_and_approved_mw",
+            "current_large_load_interconnection_queue_mw",
+            "loads_approved_to_energize_mw",
+            "report_label",
+            "report_url",
+            "parse_warning",
+        ]
+        if column in history_df.columns
+    ]
+    st.dataframe(history_df[display_columns], use_container_width=True, height=420)
+    st.download_button(
+        label="Download Large Load Trend (CSV)",
+        data=history_df[display_columns].to_csv(index=False).encode("utf-8"),
+        file_name="ercot_large_load_trend.csv",
+        mime="text/csv",
+    )
+
+
 st.set_page_config(
     page_title="ERCOT Interconnection Queue",
     layout="wide",
@@ -875,13 +1047,17 @@ with st.sidebar:
     st.header("App Tab")
     app_view = st.radio(
         "Select View",
-        options=["Interconnection Queue", "Operating Assets"],
+        options=["Interconnection Queue", "Operating Assets", "Large Load Requests"],
         index=0,
         key="app_view",
     )
 
 if app_view == "Operating Assets":
     _render_operating_assets_view()
+    st.stop()
+
+if app_view == "Large Load Requests":
+    _render_large_load_requests_view()
     st.stop()
 
 
