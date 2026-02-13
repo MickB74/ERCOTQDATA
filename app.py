@@ -95,6 +95,51 @@ def _apply_crosswalk_columns(df: pd.DataFrame, semantic: dict[str, str | None]) 
     return result
 
 
+def _extract_under_study_capacity_mw(df: pd.DataFrame) -> float | None:
+    if df.empty:
+        return None
+
+    text_cols = [
+        column
+        for column in df.columns
+        if pd.api.types.is_object_dtype(df[column]) or pd.api.types.is_string_dtype(df[column])
+    ]
+    if not text_cols:
+        return None
+
+    text_frame = df[text_cols].astype("string")
+    match_mask = text_frame.apply(
+        lambda col: col.str.contains("total capacity under study", case=False, na=False, regex=False)
+    ).any(axis=1)
+    if not match_mask.any():
+        return None
+
+    matched_rows = df[match_mask]
+    numeric_rows = matched_rows.apply(lambda col: pd.to_numeric(col, errors="coerce"))
+    values = [float(value) for value in numeric_rows.to_numpy().ravel() if pd.notna(value) and float(value) > 0]
+    if not values:
+        return None
+
+    return max(values)
+
+
+def _extract_project_detail_capacity_mw(df: pd.DataFrame, capacity_column: str | None) -> float | None:
+    if df.empty or not capacity_column or capacity_column not in df.columns or "source_sheet" not in df.columns:
+        return None
+
+    source_text = df["source_sheet"].astype("string").str.lower()
+    project_mask = source_text.str.contains("project details - large gen|project details - small gen", na=False)
+    project_rows = df[project_mask]
+    if project_rows.empty:
+        return None
+
+    capacity = pd.to_numeric(project_rows[capacity_column], errors="coerce")
+    if not capacity.notna().any():
+        return None
+
+    return float(capacity.sum(skipna=True))
+
+
 st.set_page_config(
     page_title="ERCOT Interconnection Queue",
     layout="wide",
@@ -157,6 +202,14 @@ current_df, current_meta = load_latest_snapshot()
 if current_df is None or current_df.empty:
     st.info("No snapshot yet. Click `Refresh Data` in the sidebar to pull the first dataset.")
     st.stop()
+
+snapshot_df = current_df.copy()
+snapshot_semantic = infer_semantic_columns(snapshot_df)
+official_under_study_mw = _extract_under_study_capacity_mw(snapshot_df)
+detail_project_capacity_mw = _extract_project_detail_capacity_mw(
+    snapshot_df,
+    snapshot_semantic.get("capacity_mw"),
+)
 
 scope_options = [
     "Combined (Large + Small)",
@@ -306,9 +359,13 @@ metric_cols[0].metric("Filtered Projects", f"{len(filtered_df):,}")
 metric_cols[1].metric("Total Projects", f"{len(current_df):,}")
 
 capacity_col = semantic.get("capacity_mw")
+filtered_capacity_mw = None
 if capacity_col and capacity_col in filtered_df.columns:
-    total_capacity = pd.to_numeric(filtered_df[capacity_col], errors="coerce").sum(skipna=True)
-    metric_cols[2].metric("Filtered Capacity (MW)", f"{total_capacity:,.0f}")
+    filtered_capacity_mw = float(pd.to_numeric(filtered_df[capacity_col], errors="coerce").sum(skipna=True))
+if selected_scope == "Combined (Large + Small)" and official_under_study_mw is not None:
+    metric_cols[2].metric("ERCOT Under Study (MW)", f"{official_under_study_mw:,.0f}")
+elif filtered_capacity_mw is not None:
+    metric_cols[2].metric("Filtered Capacity (MW)", f"{filtered_capacity_mw:,.0f}")
 else:
     metric_cols[2].metric("Filtered Capacity (MW)", "n/a")
 
@@ -322,6 +379,26 @@ else:
 
 if scope_notice:
     st.caption(scope_notice)
+
+if selected_scope == "Combined (Large + Small)" and official_under_study_mw is not None:
+    if detail_project_capacity_mw is not None:
+        difference_mw = official_under_study_mw - detail_project_capacity_mw
+        st.caption(
+            "ERCOT Summary total under study: "
+            f"{official_under_study_mw:,.2f} MW. "
+            "Project Details tabs total: "
+            f"{detail_project_capacity_mw:,.2f} MW. "
+            f"Difference: {difference_mw:,.2f} MW."
+        )
+        st.caption(
+            "Note: Some under-study projects are counted in ERCOT summary totals but are not listed in the "
+            "Project Details tabs yet (detail-level list excludes those undelivered/unlisted projects)."
+        )
+    else:
+        st.caption(
+            f"ERCOT Summary total under study: {official_under_study_mw:,.2f} MW "
+            "(from the Summary tab)."
+        )
 
 if current_meta:
     st.caption(
