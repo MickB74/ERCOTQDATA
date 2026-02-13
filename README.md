@@ -49,12 +49,13 @@ streamlit run app.py
 
 ## Notes
 
-- Auto-fetch uses ERCOT MIS report link discovery only (ERCOT-hosted URLs).
-- If auto-discovery fails, paste a direct ERCOT CSV/XLS/XLSX/ZIP URL into `Custom ERCOT file URL` and refresh.
+- Auto-fetch starts at ERCOT data product page `PG7-200-ER`, derives `Report Type ID`, then pulls the latest GIS file from ERCOT MIS.
+- If auto-discovery fails, paste an ERCOT `data-product-details` URL or direct ERCOT CSV/XLS/XLSX/ZIP URL into `Custom ERCOT file URL` and refresh.
 - All pull timestamps are stored in UTC.
 
 ## Optional Environment Variables
 
 - `ERCOT_REPORT_INDEX_URL`: override the default MIS index URL
+- `ERCOT_DATA_PRODUCT_URL`: override the default ERCOT data-product-details URL
 - `ERCOT_REQUEST_TIMEOUT`: HTTP timeout in seconds (default `60`)
 - `ERCOT_MAX_CHANGE_SAMPLE_ROWS`: limit stored sample rows in change reports (default `500`)

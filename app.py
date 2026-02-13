@@ -56,7 +56,10 @@ with st.sidebar:
     st.header("Data Refresh")
     custom_url = st.text_input(
         "Custom ERCOT file URL (optional)",
-        help="Leave blank to auto-discover the latest ERCOT GIS/interconnection report.",
+        help=(
+            "Leave blank to auto-discover latest GIS from ERCOT data product PG7-200-ER. "
+            "You can also paste an ERCOT data-product-details URL or direct ERCOT file URL."
+        ),
     ).strip()
 
     if st.button("Refresh Data", type="primary", use_container_width=True):

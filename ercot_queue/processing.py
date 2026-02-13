@@ -16,6 +16,7 @@ def prepare_queue_dataframe(raw_df: pd.DataFrame) -> pd.DataFrame:
     df = raw_df.copy()
     df = df.dropna(axis=1, how="all").dropna(axis=0, how="all")
     df.columns = [_normalize_column_name(col) for col in df.columns]
+    df = _dedupe_column_names(df)
     df = _clean_string_values(df)
     df = _infer_numeric_columns(df)
     df = _infer_date_columns(df)
@@ -59,7 +60,17 @@ def infer_semantic_columns(df: pd.DataFrame) -> dict[str, str | None]:
         "developer": _match_first(columns, [r"interconnecting.*entity", r"developer", r"owner", r"entity"]),
         "reporting_zone": _match_first(columns, [r"reporting.*zone", r"zone", r"region"]),
         "project_name": _match_first(columns, [r"project", r"name"]),
-        "queue_id": _match_first(columns, [r"queue.*(id|number)", r"project.*id", r"^id$"]),
+        "queue_id": _match_first(
+            columns,
+            [
+                r"queue.*(id|number)",
+                r"project.*id",
+                r"^id$",
+                r"^inr$",
+                r"^ginr$",
+                r"^gir$",
+            ],
+        ),
     }
 
 
@@ -69,6 +80,9 @@ def _select_key_columns(df: pd.DataFrame) -> list[str]:
         r"queue.*(id|number)",
         r"project.*id",
         r"^id$",
+        r"^inr$",
+        r"^ginr$",
+        r"^gir$",
         r"project.*name",
         r"interconnecting.*entity",
         r"resource.*name",
@@ -91,6 +105,22 @@ def _normalize_column_name(column: Any) -> str:
     text = re.sub(r"[^a-z0-9]+", "_", text)
     text = re.sub(r"_+", "_", text).strip("_")
     return text or "column"
+
+
+def _dedupe_column_names(df: pd.DataFrame) -> pd.DataFrame:
+    seen: dict[str, int] = {}
+    deduped: list[str] = []
+
+    for column in df.columns:
+        count = seen.get(column, 0)
+        if count == 0:
+            deduped.append(column)
+        else:
+            deduped.append(f"{column}_{count}")
+        seen[column] = count + 1
+
+    df.columns = deduped
+    return df
 
 
 def _clean_string_values(df: pd.DataFrame) -> pd.DataFrame:

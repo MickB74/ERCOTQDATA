@@ -13,7 +13,11 @@ import pandas as pd
 import requests
 from bs4 import BeautifulSoup
 
-from ercot_queue.config import DEFAULT_REPORT_INDEX_URLS, REQUEST_TIMEOUT_SECONDS
+from ercot_queue.config import (
+    DEFAULT_DATA_PRODUCT_URLS,
+    DEFAULT_REPORT_INDEX_URLS,
+    REQUEST_TIMEOUT_SECONDS,
+)
 
 DATA_EXTENSIONS = (".csv", ".xls", ".xlsx", ".zip")
 DATE_PATTERNS = [
@@ -28,10 +32,48 @@ def fetch_latest_ercot_queue(custom_url: str | None = None) -> tuple[pd.DataFram
 
     if custom_url:
         _assert_ercot_url(custom_url, "Custom URL")
-        df = _download_table(custom_url)
+        if "data-product-details" in custom_url:
+            index_url, product_meta = discover_report_index_from_product_page(custom_url)
+            report_url = discover_latest_report_url(index_url)
+            df = _download_table(report_url)
+            source_meta = {
+                "source": "ercot_data_product",
+                "source_url": report_url,
+                "index_url": index_url,
+                **product_meta,
+            }
+        else:
+            df = _download_table(custom_url)
+            source_meta = {"source": "ercot_custom", "source_url": custom_url}
+
         if df.empty:
             raise RuntimeError(f"Custom ERCOT URL returned no rows: {custom_url}")
-        return df, {"source": "ercot_custom", "source_url": custom_url}
+        return df, source_meta
+
+    product_urls = list(DEFAULT_DATA_PRODUCT_URLS)
+    env_product_url = os.environ.get("ERCOT_DATA_PRODUCT_URL")
+    if env_product_url:
+        _assert_ercot_url(env_product_url, "ERCOT_DATA_PRODUCT_URL")
+        product_urls.insert(0, env_product_url)
+
+    for product_url in product_urls:
+        try:
+            _assert_ercot_url(product_url, "ERCOT data product URL")
+            index_url, product_meta = discover_report_index_from_product_page(product_url)
+            _assert_ercot_url(index_url, "Derived ERCOT index URL")
+            report_url = discover_latest_report_url(index_url)
+            _assert_ercot_url(report_url, "Discovered report URL")
+
+            df = _download_table(report_url)
+            if not df.empty:
+                return df, {
+                    "source": "ercot_data_product",
+                    "source_url": report_url,
+                    "index_url": index_url,
+                    **product_meta,
+                }
+        except Exception as exc:  # pylint: disable=broad-except
+            errors.append(f"{product_url}: {exc}")
 
     index_urls = list(DEFAULT_REPORT_INDEX_URLS)
     env_index_url = os.environ.get("ERCOT_REPORT_INDEX_URL")
@@ -63,22 +105,62 @@ def fetch_latest_ercot_queue(custom_url: str | None = None) -> tuple[pd.DataFram
     )
 
 
+def discover_report_index_from_product_page(product_url: str) -> tuple[str, dict[str, Any]]:
+    content, _, effective_url = _fetch_url(product_url)
+    html_text = content.decode("utf-8", errors="ignore")
+    soup = BeautifulSoup(html_text, "html.parser")
+    text = soup.get_text(" ", strip=True)
+
+    report_type_match = re.search(r"report\s*type\s*id\s*(\d+)", text, flags=re.IGNORECASE)
+    if not report_type_match:
+        report_type_match = re.search(r"reportTypeId=(\d+)", html_text, flags=re.IGNORECASE)
+    if not report_type_match:
+        raise RuntimeError("Could not find Report Type ID on ERCOT data product page")
+
+    report_type_id = report_type_match.group(1)
+    index_url = (
+        "https://www.ercot.com/misapp/GetReports.do"
+        f"?reportTypeId={report_type_id}&showHTMLView=&mimicKey"
+    )
+
+    return index_url, {
+        "data_product_url": effective_url,
+        "report_type_id": report_type_id,
+    }
+
+
 def discover_latest_report_url(index_url: str) -> str:
     content, _, effective_url = _fetch_url(index_url)
     html_text = content.decode("utf-8", errors="ignore")
 
     candidates = _extract_report_candidates(html_text, effective_url)
     candidates = [candidate for candidate in candidates if _is_ercot_url(str(candidate["url"]))]
+    
     if not candidates:
         raise RuntimeError("No ERCOT report links found on ERCOT index page")
 
-    candidates.sort(key=lambda item: (item["date"], item["score"], item["position"]), reverse=True)
+    candidates.sort(key=lambda item: (item["date"], item["score"], -item["position"]), reverse=True)
     return str(candidates[0]["url"])
 
 
 def _fetch_url(url: str, timeout: int = REQUEST_TIMEOUT_SECONDS) -> tuple[bytes, str, str]:
-    """Fetches URL content using requests with a curl fallback for TLS edge-cases."""
+    """Fetches URL content using curl first for ERCOT domains, or requests with fallback."""
     headers = {"User-Agent": "Mozilla/5.0"}
+    is_ercot = _is_ercot_url(url)
+
+    # Use curl immediately for ERCOT domains to avoid requests SSL handshake issues
+    if is_ercot:
+        try:
+            output = _curl_fetch(url, headers["User-Agent"], timeout=timeout, try_legacy_cipher=False)
+            if output:
+                return output, "", url
+        except Exception:
+            try:
+                output = _curl_fetch(url, headers["User-Agent"], timeout=timeout, try_legacy_cipher=True)
+                if output:
+                    return output, "", url
+            except Exception:
+                pass
 
     try:
         response = requests.get(
@@ -91,25 +173,25 @@ def _fetch_url(url: str, timeout: int = REQUEST_TIMEOUT_SECONDS) -> tuple[bytes,
         response.raise_for_status()
         content_type = response.headers.get("content-type", "").lower()
         return response.content, content_type, response.url
-    except Exception as request_exc:  # pylint: disable=broad-except
-        curl_cmd = [
-            "curl",
-            "-k",
-            "-L",
-            "-sS",
-            "--ciphers",
-            "DEFAULT@SECLEVEL=1",
-            "-A",
-            headers["User-Agent"],
-            url,
-        ]
-        try:
-            output = subprocess.check_output(curl_cmd, timeout=timeout + 10)
-            return output, "", url
-        except Exception as curl_exc:  # pylint: disable=broad-except
-            raise RuntimeError(
-                f"Request failed via requests ({request_exc}) and curl fallback ({curl_exc})"
-            ) from request_exc
+    except Exception as request_exc:
+        # If not ERCOT and requests failed, try curl as fallback
+        if not is_ercot:
+            try:
+                output = _curl_fetch(url, headers["User-Agent"], timeout=timeout, try_legacy_cipher=False)
+                return output, "", url
+            except Exception as curl_exc:
+                raise RuntimeError(
+                    f"Request failed via requests ({request_exc}) and curl fallback ({curl_exc})"
+                ) from request_exc
+        raise request_exc
+
+
+def _curl_fetch(url: str, user_agent: str, *, timeout: int, try_legacy_cipher: bool) -> bytes:
+    cmd = ["curl", "-k", "-L", "-sS"]
+    if try_legacy_cipher:
+        cmd.extend(["--ciphers", "DEFAULT@SECLEVEL=1"])
+    cmd.extend(["-A", user_agent, url])
+    return subprocess.check_output(cmd, timeout=timeout + 5)
 
 
 def _extract_report_candidates(html: str, base_url: str) -> list[dict[str, Any]]:
@@ -117,35 +199,65 @@ def _extract_report_candidates(html: str, base_url: str) -> list[dict[str, Any]]
     results: list[dict[str, Any]] = []
     seen: set[str] = set()
 
-    for idx, anchor in enumerate(soup.find_all("a")):
-        href = (anchor.get("href") or "").strip()
-        label = " ".join(anchor.get_text(" ", strip=True).split())
-        if not href or href.startswith(("#", "javascript:", "mailto:")):
-            continue
+    # First pass: Look for links within table rows to capture context
+    for tr in soup.find_all("tr"):
+        row_text = " ".join(tr.get_text(" ", strip=True).split())
+        for anchor in tr.find_all("a"):
+            _process_anchor(anchor, base_url, seen, results, context_text=row_text)
 
-        abs_url = urljoin(base_url, href)
-        normalized = abs_url.lower()
-        label_lower = label.lower()
-
-        if normalized in seen:
-            continue
-        if not _looks_like_report_link(normalized, label_lower):
-            continue
-
-        score = _score_candidate(normalized, label_lower)
-        found_date = _parse_date(normalized) or _parse_date(label)
-        results.append(
-            {
-                "url": abs_url,
-                "label": label,
-                "score": score,
-                "date": found_date or datetime.min,
-                "position": idx,
-            }
-        )
-        seen.add(normalized)
+    # Second pass: Look for any remaining links not in tables (e.g. simple lists)
+    for anchor in soup.find_all("a"):
+         # fast check to see if we already processed this specific tag? 
+         # difficult without unique IDs. 
+         # Simpler: just process everything, _process_anchor checks 'seen' set.
+         _process_anchor(anchor, base_url, seen, results)
 
     return results
+
+
+def _process_anchor(
+    anchor: Any, 
+    base_url: str, 
+    seen: set[str], 
+    results: list[dict[str, Any]], 
+    context_text: str = ""
+) -> None:
+    href = (anchor.get("href") or "").strip()
+    link_text = " ".join(anchor.get_text(" ", strip=True).split())
+    
+    if not href or href.startswith(("#", "javascript:", "mailto:")):
+        return
+
+    abs_url = urljoin(base_url, href)
+    normalized = abs_url.lower()
+    
+    # Combined label includes the link text AND the row context
+    # This ensures "GIS Report" in the row boosts the "xlsx" link score
+    label = f"{context_text} {link_text}".strip()
+    label_lower = label.lower()
+
+    if "reporttypeid=" in normalized:
+        return
+
+    if normalized in seen:
+        return
+
+    if not _looks_like_report_link(normalized, label_lower):
+        return
+
+    score = _score_candidate(normalized, label_lower)
+    found_date = _parse_date(normalized) or _parse_date(label)
+    
+    results.append(
+        {
+            "url": abs_url,
+            "label": label,  # Store full context label for debugging
+            "score": score,
+            "date": found_date or datetime.min,
+            "position": len(results), # use simple counter via list len
+        }
+    )
+    seen.add(normalized)
 
 
 def _looks_like_report_link(url_lower: str, label_lower: str) -> bool:
@@ -174,9 +286,8 @@ def _looks_like_report_link(url_lower: str, label_lower: str) -> bool:
 def _score_candidate(url_lower: str, label_lower: str) -> int:
     score = 0
     combined = f"{url_lower} {label_lower}"
-
     if "gis" in combined:
-        score += 5
+        score += 20  # Strong preference for GIS report
     if "interconnection" in combined or "queue" in combined:
         score += 3
     if "status" in combined:
@@ -184,7 +295,14 @@ def _score_candidate(url_lower: str, label_lower: str) -> int:
     if "doclookupid" in url_lower or "getreport" in url_lower or "mirdownload" in url_lower:
         score += 4
     if any(url_lower.endswith(ext) for ext in DATA_EXTENSIONS):
-        score += 1
+        score += 2
+    
+    # Penalize URLs that look like index/discovery pages or unwanted reports
+    if "reportid=" in url_lower or "reporttypeid=" in url_lower or "showhtmlview" in url_lower:
+        score -= 20
+    
+    if "battery" in combined or "co-located" in combined:
+        score -= 10
 
     return score
 
@@ -231,10 +349,18 @@ def _download_table(url: str, depth: int = 0) -> pd.DataFrame:
         nested_candidates = _extract_report_candidates(html_text, effective_url)
         nested_candidates = [candidate for candidate in nested_candidates if _is_ercot_url(str(candidate["url"]))]
         if nested_candidates:
-            nested_candidates.sort(key=lambda item: (item["date"], item["score"], item["position"]), reverse=True)
+            nested_candidates.sort(key=lambda item: (item["date"], item["score"], -item["position"]), reverse=True)
             return _download_table(str(nested_candidates[0]["url"]), depth=depth + 1)
 
         raise RuntimeError(f"URL did not return tabular data: {effective_url}")
+
+    # Try Excel first (since xlsx is also a zip file with PK header)
+    try:
+        df = _read_excel_with_fallbacks(content)
+        if not df.empty:
+            return df
+    except Exception:
+        pass
 
     if url_lower.endswith(".zip") or "zip" in content_type or content[:2] == b"PK":
         return _read_zip_table(content)
@@ -245,6 +371,7 @@ def _download_table(url: str, depth: int = 0) -> pd.DataFrame:
 def _read_zip_table(content: bytes) -> pd.DataFrame:
     with zipfile.ZipFile(io.BytesIO(content)) as zf:
         names = sorted(zf.namelist())
+        # print(f"DEBUG ZIP CONTENT: {names}")
         for name in names:
             name_lower = name.lower()
             if not any(name_lower.endswith(ext) for ext in (".csv", ".xls", ".xlsx")):
@@ -272,40 +399,64 @@ def _read_table_bytes(content: bytes, source_name: str, content_type: str) -> pd
 
 def _read_excel_with_fallbacks(content: bytes) -> pd.DataFrame:
     xls = pd.ExcelFile(io.BytesIO(content))
-    candidate_tables: list[tuple[int, pd.DataFrame]] = []
+    all_dataframes: list[pd.DataFrame] = []
 
     for sheet_name in xls.sheet_names:
-        for header_row in (0, 1, 2, 3, 4):
+        # Skip known non-data sheets
+        if re.search(r"cover|disclaimer|acronym|summary|contents|notes|legend|history", sheet_name, re.IGNORECASE):
+            continue
+
+        sheet_best_score = -1
+        sheet_best_df = pd.DataFrame()
+
+        # Try a few common header positions, searching deeper for "Project Details" sheets
+        for header_row in range(100):
             try:
                 df = pd.read_excel(xls, sheet_name=sheet_name, header=header_row)
-            except Exception:  # pylint: disable=broad-except
+            except Exception:
                 continue
 
             if df is None or df.empty:
                 continue
 
-            cleaned = df.dropna(axis=1, how="all").dropna(axis=0, how="all")
-            if cleaned.empty:
+            # Check if this looks like a project list
+            score = _score_table_columns(df.columns)
+            if score > sheet_best_score:
+                sheet_best_score = score
+                sheet_best_df = df
+
+        if sheet_best_score >= 10:  # Must have at least a Queue ID to be considered
+            cleaned = sheet_best_df.dropna(axis=1, how="all").dropna(axis=0, how="all")
+            if not cleaned.empty:
+                cleaned["_source_sheet"] = sheet_name
+                all_dataframes.append(cleaned)
+
+    if not all_dataframes:
+        # Final fallback: if no sheet scored well, just take the biggest one as before
+        candidate_tables: list[tuple[int, pd.DataFrame]] = []
+        for sheet_name in xls.sheet_names:
+            try:
+                df = pd.read_excel(xls, sheet_name=sheet_name)
+                if not df.empty:
+                    candidate_tables.append((len(df), df))
+            except Exception:
                 continue
-
-            score = _score_table_columns(cleaned.columns)
-            score += min(len(cleaned), 1000) // 100
-            candidate_tables.append((score, cleaned))
-
-    if not candidate_tables:
+        if candidate_tables:
+            candidate_tables.sort(key=lambda item: item[0], reverse=True)
+            return candidate_tables[0][1]
         return pd.DataFrame()
 
-    candidate_tables.sort(key=lambda item: item[0], reverse=True)
-    return candidate_tables[0][1]
+    # Consolidate all project-bearing sheets
+    return pd.concat(all_dataframes, ignore_index=True, sort=False)
 
 
 def _score_table_columns(columns: Any) -> int:
     score = 0
     column_text = " ".join(str(col).lower() for col in columns)
 
-    if "queue" in column_text and "id" in column_text:
+    if ("queue" in column_text and "id" in column_text) or "inr" in column_text or "gim" in column_text:
         score += 10
-    if "project" in column_text:
+    if "project" in column_text or "name" in column_text:
         score += 6
     if "status" in column_text:
         score += 5
@@ -346,4 +497,8 @@ def _looks_like_html(content: bytes, content_type: str) -> bool:
         return True
 
     trimmed = content.lstrip()
-    return trimmed.startswith((b"<!DOCTYPE html", b"<html"))
+    if not trimmed:
+        return False
+        
+    lower_start = trimmed[:100].lower()
+    return lower_start.startswith((b"<!doctype html", b"<html"))
