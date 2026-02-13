@@ -233,6 +233,80 @@ def _style_chart(fig: Any, *, x_tick_angle: int = -30, height: int = 380) -> Non
     fig.update_yaxes(automargin=True)
 
 
+def _apply_chart_filters(
+    df: pd.DataFrame,
+    chart_filters: dict[str, list[str]],
+    *,
+    fuel_display_col: str | None,
+    technology_display_col: str | None,
+    developer_col: str | None,
+    zone_col: str | None,
+    cod_col: str | None,
+    exclude_key: str | None = None,
+) -> pd.DataFrame:
+    filtered = df
+
+    if exclude_key != "fuel" and chart_filters.get("fuel") and fuel_display_col and fuel_display_col in filtered.columns:
+        selected_fuel = set(chart_filters["fuel"])
+        filtered = filtered[filtered[fuel_display_col].map(_normalize_filter_value).isin(selected_fuel)]
+
+    if (
+        exclude_key != "technology"
+        and chart_filters.get("technology")
+        and technology_display_col
+        and technology_display_col in filtered.columns
+    ):
+        selected_technology = set(chart_filters["technology"])
+        filtered = filtered[filtered[technology_display_col].map(_normalize_filter_value).isin(selected_technology)]
+
+    if exclude_key != "developer" and chart_filters.get("developer") and developer_col and developer_col in filtered.columns:
+        selected_developer = set(chart_filters["developer"])
+        filtered = filtered[filtered[developer_col].map(_normalize_filter_value).isin(selected_developer)]
+
+    if exclude_key != "zone" and chart_filters.get("zone") and zone_col and zone_col in filtered.columns:
+        selected_zone = set(chart_filters["zone"])
+        filtered = filtered[filtered[zone_col].map(_normalize_filter_value).isin(selected_zone)]
+
+    if exclude_key != "cod_year" and chart_filters.get("cod_year") and cod_col and cod_col in filtered.columns:
+        selected_years = set(chart_filters["cod_year"])
+        cod_year = pd.to_datetime(filtered[cod_col], errors="coerce").dt.year
+        cod_year_text = cod_year.map(lambda value: str(int(value)) if pd.notna(value) else "Unknown")
+        filtered = filtered[cod_year_text.isin(selected_years)]
+
+    return filtered
+
+
+def _apply_selection_highlight(
+    plot_df: pd.DataFrame,
+    dimension_col: str,
+    selected_values: list[str],
+) -> tuple[pd.DataFrame, str | None]:
+    if not selected_values or dimension_col not in plot_df.columns:
+        return plot_df, None
+
+    highlighted = plot_df.copy()
+    selected_set = set(selected_values)
+    highlighted["selection_state"] = highlighted[dimension_col].map(
+        lambda value: "Selected" if _normalize_filter_value(value) in selected_set else "Other"
+    )
+    return highlighted, "selection_state"
+
+
+def _sync_sidebar_filter_state_from_chart_filters(chart_filters: dict[str, list[str]]) -> None:
+    chart_to_sidebar_key = {
+        "fuel": "fuel",
+        "technology": "technology",
+        "developer": "developer",
+        "zone": "reporting_zone",
+    }
+    for chart_key, sidebar_key in chart_to_sidebar_key.items():
+        selected = chart_filters.get(chart_key)
+        if not selected:
+            continue
+        st.session_state[f"all_{sidebar_key}"] = False
+        st.session_state[f"select_{sidebar_key}"] = selected
+
+
 def _source_identity(source_url: str | None) -> str:
     if not source_url:
         return ""
@@ -446,22 +520,28 @@ technology_col = semantic.get("technology")
 zone_col = semantic.get("reporting_zone")
 developer_col = semantic.get("developer")
 county_col = semantic.get("county")
+cod_col = semantic.get("cod_date")
 fuel_display_col = "fuel_name" if "fuel_name" in current_df.columns else fuel_col
 technology_display_col = "technology_name" if "technology_name" in current_df.columns else technology_col
+chart_filters: dict[str, list[str]] = st.session_state.setdefault("chart_filters", {})
+# Status chart was removed; drop any stale status chart selection.
+if "status" in chart_filters:
+    chart_filters.pop("status", None)
+_sync_sidebar_filter_state_from_chart_filters(chart_filters)
 
 with st.sidebar:
     st.header("Filters")
 
     filter_definitions = [
-        ("Status", status_col, "status"),
-        ("Fuel", fuel_display_col, "fuel"),
-        ("Technology", technology_display_col, "technology"),
-        ("Reporting Zone", zone_col, "reporting_zone"),
-        ("Developer", developer_col, "developer"),
-        ("County", county_col, "county"),
+        ("Status", "Statuses", status_col, "status"),
+        ("Fuel", "Fuels", fuel_display_col, "fuel"),
+        ("Technology", "Technologies", technology_display_col, "technology"),
+        ("Reporting Zone", "Reporting Zones", zone_col, "reporting_zone"),
+        ("Developer", "Developers", developer_col, "developer"),
+        ("County", "Counties", county_col, "county"),
     ]
 
-    for label, column, filter_key in filter_definitions:
+    for label, plural_label, column, filter_key in filter_definitions:
         if not column or column not in filtered_df.columns:
             continue
 
@@ -487,10 +567,20 @@ with st.sidebar:
         if not options:
             continue
 
+        select_key = f"select_{filter_key}"
+        existing_selected = st.session_state.get(select_key)
+        if isinstance(existing_selected, list):
+            st.session_state[select_key] = [value for value in existing_selected if value in options]
+
         # Add "Select All" logic
-        select_all = st.checkbox(f"All {label}", value=True, key=f"all_{filter_key}")
+        select_all = st.checkbox(f"All {plural_label}", value=True, key=f"all_{filter_key}")
         if not select_all:
-            selected = st.multiselect(f"Select {label}", options=options, default=options, key=f"select_{filter_key}")
+            selected = st.multiselect(
+                f"Select {plural_label}",
+                options=options,
+                default=options,
+                key=select_key,
+            )
             if selected and set(selected) != set(options):
                 filtered_df = filtered_df[filtered_df[column].astype(str).isin(selected)]
                 active_filters.append(label)
@@ -520,7 +610,6 @@ with st.sidebar:
             else:
                 st.caption(f"Capacity: {minimum:,.0f} MW")
 
-    cod_col = semantic.get("cod_date")
     if cod_col and cod_col in filtered_df.columns:
         cod_series = pd.to_datetime(filtered_df[cod_col], errors="coerce")
         if cod_series.notna().any():
@@ -550,29 +639,16 @@ with st.sidebar:
         st.session_state["chart_filters"] = {}
         st.rerun()
 
-chart_filters: dict[str, list[str]] = st.session_state.setdefault("chart_filters", {})
-# Status chart was removed; drop any stale status chart selection.
-if "status" in chart_filters:
-    chart_filters.pop("status", None)
-
-if chart_filters.get("fuel") and fuel_display_col and fuel_display_col in filtered_df.columns:
-    selected_fuel = set(chart_filters["fuel"])
-    filtered_df = filtered_df[filtered_df[fuel_display_col].map(_normalize_filter_value).isin(selected_fuel)]
-if chart_filters.get("technology") and technology_display_col and technology_display_col in filtered_df.columns:
-    selected_technology = set(chart_filters["technology"])
-    filtered_df = filtered_df[filtered_df[technology_display_col].map(_normalize_filter_value).isin(selected_technology)]
-if chart_filters.get("developer") and developer_col and developer_col in filtered_df.columns:
-    selected_developer = set(chart_filters["developer"])
-    filtered_df = filtered_df[filtered_df[developer_col].map(_normalize_filter_value).isin(selected_developer)]
-if chart_filters.get("zone") and zone_col and zone_col in filtered_df.columns:
-    selected_zone = set(chart_filters["zone"])
-    filtered_df = filtered_df[filtered_df[zone_col].map(_normalize_filter_value).isin(selected_zone)]
-
-if chart_filters.get("cod_year") and cod_col and cod_col in filtered_df.columns:
-    selected_years = set(chart_filters["cod_year"])
-    cod_year = pd.to_datetime(filtered_df[cod_col], errors="coerce").dt.year
-    cod_year_text = cod_year.map(lambda value: str(int(value)) if pd.notna(value) else "Unknown")
-    filtered_df = filtered_df[cod_year_text.isin(selected_years)]
+charts_base_df = filtered_df.copy()
+filtered_df = _apply_chart_filters(
+    filtered_df,
+    chart_filters,
+    fuel_display_col=fuel_display_col,
+    technology_display_col=technology_display_col,
+    developer_col=developer_col,
+    zone_col=zone_col,
+    cod_col=cod_col,
+)
 
 if chart_filters:
     chart_filter_labels: list[str] = []
@@ -655,16 +731,54 @@ if current_meta:
 st.subheader("Fuel and Technology Mix")
 st.caption("Chart clicks can select multiple items when `Chart Selection Mode` is set to `Add to selection`.")
 chart_col_1, chart_col_2 = st.columns(2)
+fuel_chart_df = _apply_chart_filters(
+    charts_base_df,
+    chart_filters,
+    fuel_display_col=fuel_display_col,
+    technology_display_col=technology_display_col,
+    developer_col=developer_col,
+    zone_col=zone_col,
+    cod_col=cod_col,
+    exclude_key="fuel",
+)
+technology_chart_df = _apply_chart_filters(
+    charts_base_df,
+    chart_filters,
+    fuel_display_col=fuel_display_col,
+    technology_display_col=technology_display_col,
+    developer_col=developer_col,
+    zone_col=zone_col,
+    cod_col=cod_col,
+    exclude_key="technology",
+)
 
-if fuel_display_col and fuel_display_col in filtered_df.columns:
+if fuel_display_col and fuel_display_col in fuel_chart_df.columns:
     fuel_plot = (
-        filtered_df.groupby(fuel_display_col, dropna=False)
+        fuel_chart_df.groupby(fuel_display_col, dropna=False)
         .size()
         .reset_index(name="projects")
         .sort_values("projects", ascending=False)
         .head(20)
     )
-    fuel_fig = px.bar(fuel_plot, x=fuel_display_col, y="projects", title="Projects by Fuel")
+    fuel_plot, fuel_color_col = _apply_selection_highlight(
+        fuel_plot,
+        fuel_display_col,
+        chart_filters.get("fuel", []),
+    )
+    fuel_chart_kwargs: dict[str, Any] = {}
+    if fuel_color_col:
+        fuel_chart_kwargs = {
+            "color": fuel_color_col,
+            "color_discrete_map": {"Selected": "#4C78A8", "Other": "#9AA4B2"},
+            "category_orders": {fuel_color_col: ["Selected", "Other"]},
+        }
+    fuel_fig = px.bar(
+        fuel_plot,
+        x=fuel_display_col,
+        y="projects",
+        title="Projects by Fuel",
+        **fuel_chart_kwargs,
+    )
     fuel_fig.update_layout(clickmode="event+select")
     _style_chart(fuel_fig)
     fuel_event = chart_col_1.plotly_chart(
@@ -679,19 +793,32 @@ if fuel_display_col and fuel_display_col in filtered_df.columns:
 else:
     chart_col_1.info("No fuel column detected for fuel chart.")
 
-if technology_display_col and technology_display_col in filtered_df.columns:
+if technology_display_col and technology_display_col in technology_chart_df.columns:
     technology_count_plot = (
-        filtered_df.groupby(technology_display_col, dropna=False)
+        technology_chart_df.groupby(technology_display_col, dropna=False)
         .size()
         .reset_index(name="projects")
         .sort_values("projects", ascending=False)
         .head(20)
     )
+    technology_count_plot, technology_count_color_col = _apply_selection_highlight(
+        technology_count_plot,
+        technology_display_col,
+        chart_filters.get("technology", []),
+    )
+    technology_chart_kwargs: dict[str, Any] = {}
+    if technology_count_color_col:
+        technology_chart_kwargs = {
+            "color": technology_count_color_col,
+            "color_discrete_map": {"Selected": "#4C78A8", "Other": "#9AA4B2"},
+            "category_orders": {technology_count_color_col: ["Selected", "Other"]},
+        }
     technology_count_fig = px.bar(
         technology_count_plot,
         x=technology_display_col,
         y="projects",
         title="Projects by Technology (Count)",
+        **technology_chart_kwargs,
     )
     technology_count_fig.update_layout(clickmode="event+select")
     _style_chart(technology_count_fig)
@@ -708,9 +835,9 @@ else:
     chart_col_2.info("No technology column detected for technology chart.")
 
 st.subheader("Technology Capacity (MW)")
-if technology_display_col and technology_display_col in filtered_df.columns:
-    if capacity_col and capacity_col in filtered_df.columns:
-        technology_mw_df = filtered_df.copy()
+if technology_display_col and technology_display_col in technology_chart_df.columns:
+    if capacity_col and capacity_col in technology_chart_df.columns:
+        technology_mw_df = technology_chart_df.copy()
         technology_mw_df[capacity_col] = pd.to_numeric(technology_mw_df[capacity_col], errors="coerce")
         technology_mw_plot = (
             technology_mw_df.groupby(technology_display_col, dropna=False)[capacity_col]
@@ -719,12 +846,25 @@ if technology_display_col and technology_display_col in filtered_df.columns:
             .sort_values(capacity_col, ascending=False)
             .head(20)
         )
+        technology_mw_plot, technology_mw_color_col = _apply_selection_highlight(
+            technology_mw_plot,
+            technology_display_col,
+            chart_filters.get("technology", []),
+        )
+        technology_mw_chart_kwargs: dict[str, Any] = {}
+        if technology_mw_color_col:
+            technology_mw_chart_kwargs = {
+                "color": technology_mw_color_col,
+                "color_discrete_map": {"Selected": "#4C78A8", "Other": "#9AA4B2"},
+                "category_orders": {technology_mw_color_col: ["Selected", "Other"]},
+            }
         technology_mw_fig = px.bar(
             technology_mw_plot,
             x=technology_display_col,
             y=capacity_col,
             title="Capacity by Technology (MW)",
             labels={capacity_col: "MW"},
+            **technology_mw_chart_kwargs,
         )
         technology_mw_fig.update_layout(clickmode="event+select")
         _style_chart(technology_mw_fig)
@@ -742,9 +882,19 @@ if technology_display_col and technology_display_col in filtered_df.columns:
 else:
     st.info("No technology column detected for technology MW chart.")
 
+cod_chart_df = _apply_chart_filters(
+    charts_base_df,
+    chart_filters,
+    fuel_display_col=fuel_display_col,
+    technology_display_col=technology_display_col,
+    developer_col=developer_col,
+    zone_col=zone_col,
+    cod_col=cod_col,
+    exclude_key="cod_year",
+)
 cod_col = semantic.get("cod_date")
-if cod_col and cod_col in filtered_df.columns:
-    cod_data = filtered_df.copy()
+if cod_col and cod_col in cod_chart_df.columns:
+    cod_data = cod_chart_df.copy()
     cod_data[cod_col] = pd.to_datetime(cod_data[cod_col], errors="coerce")
     cod_data = cod_data.dropna(subset=[cod_col])
 
@@ -766,6 +916,18 @@ if cod_col and cod_col in filtered_df.columns:
                 .reset_index()
             )
             cod_totals = cod_totals.merge(cod_capacity, on="cod_year", how="left")
+            cod_totals, cod_mw_color_col = _apply_selection_highlight(
+                cod_totals,
+                "cod_year",
+                chart_filters.get("cod_year", []),
+            )
+            cod_mw_chart_kwargs: dict[str, Any] = {}
+            if cod_mw_color_col:
+                cod_mw_chart_kwargs = {
+                    "color": cod_mw_color_col,
+                    "color_discrete_map": {"Selected": "#4C78A8", "Other": "#9AA4B2"},
+                    "category_orders": {cod_mw_color_col: ["Selected", "Other"]},
+                }
 
             cod_col_1, cod_col_2 = st.columns(2)
             cod_mw_fig = px.bar(
@@ -775,6 +937,7 @@ if cod_col and cod_col in filtered_df.columns:
                 title="Total Capacity by Expected COD Year (MW)",
                 labels={capacity_col: "MW", "cod_year": "Expected COD Year"},
                 hover_data={"projects": True},
+                **cod_mw_chart_kwargs,
             )
             cod_mw_fig.update_layout(clickmode="event+select")
             _style_chart(cod_mw_fig, x_tick_angle=0)
@@ -795,6 +958,15 @@ if cod_col and cod_col in filtered_df.columns:
                 title="Total Projects by Expected COD Year",
                 labels={"projects": "Projects", "cod_year": "Expected COD Year"},
                 hover_data={capacity_col: ":,.2f"},
+                **(
+                    {
+                        "color": cod_mw_color_col,
+                        "color_discrete_map": {"Selected": "#4C78A8", "Other": "#9AA4B2"},
+                        "category_orders": {cod_mw_color_col: ["Selected", "Other"]},
+                    }
+                    if cod_mw_color_col
+                    else {}
+                ),
             )
             cod_count_fig.update_layout(clickmode="event+select")
             _style_chart(cod_count_fig, x_tick_angle=0)
@@ -816,12 +988,25 @@ if cod_col and cod_col in filtered_df.columns:
                 title="Cumulative Planned Capacity by Expected COD Year",
             )
         else:
+            cod_totals, cod_count_color_col = _apply_selection_highlight(
+                cod_totals,
+                "cod_year",
+                chart_filters.get("cod_year", []),
+            )
+            cod_count_chart_kwargs: dict[str, Any] = {}
+            if cod_count_color_col:
+                cod_count_chart_kwargs = {
+                    "color": cod_count_color_col,
+                    "color_discrete_map": {"Selected": "#4C78A8", "Other": "#9AA4B2"},
+                    "category_orders": {cod_count_color_col: ["Selected", "Other"]},
+                }
             cod_count_fig = px.bar(
                 cod_totals,
                 x="cod_year",
                 y="projects",
                 title="Total Projects by Expected COD Year",
                 labels={"projects": "Projects", "cod_year": "Expected COD Year"},
+                **cod_count_chart_kwargs,
             )
             cod_count_fig.update_layout(clickmode="event+select")
             _style_chart(cod_count_fig, x_tick_angle=0)
@@ -858,17 +1043,32 @@ if cod_col and cod_col in filtered_df.columns:
 
 st.subheader("Developer Analysis (Top 15)")
 dev_col = semantic.get("developer")
-if dev_col and dev_col in filtered_df.columns:
+developer_chart_df = _apply_chart_filters(
+    charts_base_df,
+    chart_filters,
+    fuel_display_col=fuel_display_col,
+    technology_display_col=technology_display_col,
+    developer_col=developer_col,
+    zone_col=zone_col,
+    cod_col=cod_col,
+    exclude_key="developer",
+)
+if dev_col and dev_col in developer_chart_df.columns:
     dev_col_1, dev_col_2 = st.columns(2)
 
     # Top 15 by MW
-    if capacity_col and capacity_col in filtered_df.columns:
+    if capacity_col and capacity_col in developer_chart_df.columns:
         dev_mw = (
-            filtered_df.groupby(dev_col)[capacity_col]
+            developer_chart_df.groupby(dev_col)[capacity_col]
             .sum()
             .reset_index()
             .sort_values(capacity_col, ascending=False)
             .head(15)
+        )
+        dev_mw, dev_mw_color_col = _apply_selection_highlight(
+            dev_mw,
+            dev_col,
+            chart_filters.get("developer", []),
         )
         dev_mw_fig = px.bar(
             dev_mw,
@@ -877,6 +1077,15 @@ if dev_col and dev_col in filtered_df.columns:
             orientation="h",
             title="Top 15 Developers by Capacity (MW)",
             labels={capacity_col: "Total MW", dev_col: "Developer"},
+            **(
+                {
+                    "color": dev_mw_color_col,
+                    "color_discrete_map": {"Selected": "#4C78A8", "Other": "#9AA4B2"},
+                    "category_orders": {dev_mw_color_col: ["Selected", "Other"]},
+                }
+                if dev_mw_color_col
+                else {}
+            ),
         )
         dev_mw_fig.update_layout(yaxis={"categoryorder": "total ascending"})
         dev_mw_fig.update_layout(clickmode="event+select")
@@ -893,11 +1102,16 @@ if dev_col and dev_col in filtered_df.columns:
 
     # Top 15 by Count
     dev_count = (
-        filtered_df.groupby(dev_col)
+        developer_chart_df.groupby(dev_col)
         .size()
         .reset_index(name="project_count")
         .sort_values("project_count", ascending=False)
         .head(15)
+    )
+    dev_count, dev_count_color_col = _apply_selection_highlight(
+        dev_count,
+        dev_col,
+        chart_filters.get("developer", []),
     )
     dev_count_fig = px.bar(
         dev_count,
@@ -906,6 +1120,15 @@ if dev_col and dev_col in filtered_df.columns:
         orientation="h",
         title="Top 15 Developers by Project Count",
         labels={"project_count": "Number of Projects", dev_col: "Developer"},
+        **(
+            {
+                "color": dev_count_color_col,
+                "color_discrete_map": {"Selected": "#4C78A8", "Other": "#9AA4B2"},
+                "category_orders": {dev_count_color_col: ["Selected", "Other"]},
+            }
+            if dev_count_color_col
+            else {}
+        ),
     )
     dev_count_fig.update_layout(yaxis={"categoryorder": "total ascending"})
     dev_count_fig.update_layout(clickmode="event+select")
@@ -925,12 +1148,22 @@ else:
 
 st.subheader("Regional Analysis")
 fuel_col_for_region = fuel_display_col
+zone_chart_df = _apply_chart_filters(
+    charts_base_df,
+    chart_filters,
+    fuel_display_col=fuel_display_col,
+    technology_display_col=technology_display_col,
+    developer_col=developer_col,
+    zone_col=zone_col,
+    cod_col=cod_col,
+    exclude_key="zone",
+)
 
-if zone_col and zone_col in filtered_df.columns:
-    if capacity_col and capacity_col in filtered_df.columns:
+if zone_col and zone_col in zone_chart_df.columns:
+    if capacity_col and capacity_col in zone_chart_df.columns:
         # Prepare data for stacked bars
         zone_fuel_df = (
-            filtered_df.groupby([zone_col, fuel_col_for_region or "Unknown"])[capacity_col]
+            zone_chart_df.groupby([zone_col, fuel_col_for_region or "Unknown"])[capacity_col]
             .sum()
             .reset_index()
             .sort_values(capacity_col, ascending=False)
