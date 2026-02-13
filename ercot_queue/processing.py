@@ -42,27 +42,58 @@ def build_record_key(df: pd.DataFrame) -> pd.Series:
 
 
 def infer_semantic_columns(df: pd.DataFrame) -> dict[str, str | None]:
-    columns = list(df.columns)
     return {
-        "status": _match_first(columns, [r"status"]),
-        "fuel": _match_first(columns, [r"fuel", r"technology", r"resource[_ ]type"]),
-        "county": _match_first(columns, [r"county", r"location_county"]),
-        "capacity_mw": _match_first(columns, [r"capacity.*mw", r"mw", r"size"]),
-        "cod_date": _match_first(
-            columns,
-            [
+        "status": _select_semantic_column(
+            df,
+            preferred_exact=["project_status", "gim_study_phase", "status"],
+            patterns=[r"project_status", r"gim.*phase", r"status", r"milestone"],
+        ),
+        "fuel": _select_semantic_column(
+            df,
+            preferred_exact=["fuel", "technology", "resource_type"],
+            patterns=[r"fuel", r"technology", r"resource[_ ]type"],
+        ),
+        "county": _select_semantic_column(
+            df,
+            preferred_exact=["county", "location_county"],
+            patterns=[r"county", r"location_county"],
+        ),
+        "capacity_mw": _select_semantic_column(
+            df,
+            preferred_exact=["capacity_mw", "capacity_mw_1"],
+            patterns=[r"capacity.*mw", r"\bmw\b", r"size"],
+            numeric_required=True,
+        ),
+        "cod_date": _select_semantic_column(
+            df,
+            preferred_exact=["projected_cod", "commercial_operation_date", "cod", "in_service"],
+            patterns=[
                 r"proposed.*completion",
                 r"commercial.*operation",
                 r"cod",
                 r"in.?service",
             ],
+            date_required=True,
         ),
-        "developer": _match_first(columns, [r"interconnecting.*entity", r"developer", r"owner", r"entity"]),
-        "reporting_zone": _match_first(columns, [r"reporting.*zone", r"zone", r"region"]),
-        "project_name": _match_first(columns, [r"project", r"name"]),
-        "queue_id": _match_first(
-            columns,
-            [
+        "developer": _select_semantic_column(
+            df,
+            preferred_exact=["interconnecting_entity", "developer", "owner", "entity"],
+            patterns=[r"interconnecting.*entity", r"developer", r"owner", r"entity"],
+        ),
+        "reporting_zone": _select_semantic_column(
+            df,
+            preferred_exact=["cdr_reporting_zone", "reporting_zone", "zone", "region"],
+            patterns=[r"reporting.*zone", r"zone", r"region"],
+        ),
+        "project_name": _select_semantic_column(
+            df,
+            preferred_exact=["project_name", "unit_name"],
+            patterns=[r"project.*name", r"resource.*name", r"\bname\b"],
+        ),
+        "queue_id": _select_semantic_column(
+            df,
+            preferred_exact=["inr", "ginr", "gir", "queue_id", "project_id", "id"],
+            patterns=[
                 r"queue.*(id|number)",
                 r"project.*id",
                 r"^id$",
@@ -72,6 +103,90 @@ def infer_semantic_columns(df: pd.DataFrame) -> dict[str, str | None]:
             ],
         ),
     }
+
+
+def _select_semantic_column(
+    df: pd.DataFrame,
+    preferred_exact: list[str],
+    patterns: list[str],
+    *,
+    numeric_required: bool = False,
+    date_required: bool = False,
+) -> str | None:
+    candidates: list[tuple[int, str]] = []
+
+    lower_to_original = {column.lower(): column for column in df.columns}
+    for idx, exact in enumerate(preferred_exact):
+        original = lower_to_original.get(exact.lower())
+        if original:
+            base_score = 200 - (idx * 10)
+            total = _semantic_data_score(df, original, base_score, numeric_required, date_required)
+            candidates.append((total, original))
+
+    for column in df.columns:
+        col_lower = column.lower()
+        pattern_hits = 0
+        for idx, pattern in enumerate(patterns):
+            if re.search(pattern, col_lower):
+                pattern_hits += max(1, 30 - idx)
+        if pattern_hits == 0:
+            continue
+        total = _semantic_data_score(df, column, pattern_hits, numeric_required, date_required)
+        candidates.append((total, column))
+
+    if not candidates:
+        return None
+
+    candidates.sort(key=lambda item: item[0], reverse=True)
+    best_score, best_column = candidates[0]
+    if best_score <= 0:
+        return None
+    return best_column
+
+
+def _semantic_data_score(
+    df: pd.DataFrame,
+    column: str,
+    base_score: int,
+    numeric_required: bool,
+    date_required: bool,
+) -> int:
+    series = df[column]
+    if isinstance(series, pd.DataFrame):
+        return -999
+
+    score = base_score
+    if len(series):
+        non_na_ratio = float(series.notna().mean())
+        unique_count = int(series.nunique(dropna=True))
+    else:
+        non_na_ratio = 0.0
+        unique_count = 0
+
+    score += int(non_na_ratio * 80)
+    score += min(unique_count, 25)
+
+    if numeric_required:
+        numeric_ratio = float(pd.to_numeric(series, errors="coerce").notna().mean()) if len(series) else 0.0
+        score += int(numeric_ratio * 90)
+        if numeric_ratio < 0.2:
+            score -= 200
+
+    if date_required:
+        date_ratio = float(pd.to_datetime(series, errors="coerce").notna().mean()) if len(series) else 0.0
+        score += int(date_ratio * 90)
+        if date_ratio < 0.2:
+            score -= 200
+
+    col_lower = column.lower()
+    if col_lower.startswith("unnamed"):
+        score -= 150
+    if "tables_that_provide" in col_lower:
+        score -= 80
+    if len(col_lower) > 70:
+        score -= 20
+
+    return score
 
 
 def _select_key_columns(df: pd.DataFrame) -> list[str]:
