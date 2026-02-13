@@ -226,6 +226,21 @@ def _update_chart_filter(filter_key: str, values: list[str]) -> bool:
         chart_filters[filter_key] = merged_values
     else:
         chart_filters.pop(filter_key, None)
+
+    chart_to_sidebar_key = {
+        "fuel": "fuel",
+        "technology": "technology",
+        "developer": "developer",
+        "zone": "reporting_zone",
+    }
+    sidebar_key = chart_to_sidebar_key.get(filter_key)
+    if sidebar_key:
+        if merged_values:
+            st.session_state[f"all_{sidebar_key}"] = False
+            st.session_state[f"select_{sidebar_key}"] = merged_values
+        else:
+            st.session_state[f"all_{sidebar_key}"] = True
+            st.session_state.pop(f"select_{sidebar_key}", None)
     return True
 
 
@@ -234,6 +249,7 @@ def _style_chart(fig: Any, *, x_tick_angle: int = -30, height: int = 380) -> Non
         height=height,
         margin=dict(l=8, r=8, t=56, b=8),
         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1.0),
+        dragmode="select",
     )
     fig.update_xaxes(tickangle=x_tick_angle, automargin=True)
     fig.update_yaxes(automargin=True)
@@ -298,19 +314,11 @@ def _apply_selection_highlight(
     return highlighted, "selection_state"
 
 
-def _sync_sidebar_filter_state_from_chart_filters(chart_filters: dict[str, list[str]]) -> None:
-    chart_to_sidebar_key = {
-        "fuel": "fuel",
-        "technology": "technology",
-        "developer": "developer",
-        "zone": "reporting_zone",
-    }
-    for chart_key, sidebar_key in chart_to_sidebar_key.items():
-        selected = chart_filters.get(chart_key)
-        if not selected:
-            continue
-        st.session_state[f"all_{sidebar_key}"] = False
-        st.session_state[f"select_{sidebar_key}"] = selected
+def _clear_chart_and_synced_sidebar_filters() -> None:
+    st.session_state["chart_filters"] = {}
+    for sidebar_key in ("fuel", "technology", "developer", "reporting_zone"):
+        st.session_state[f"all_{sidebar_key}"] = True
+        st.session_state.pop(f"select_{sidebar_key}", None)
 
 
 def _source_identity(source_url: str | None) -> str:
@@ -533,7 +541,6 @@ chart_filters: dict[str, list[str]] = st.session_state.setdefault("chart_filters
 # Status chart was removed; drop any stale status chart selection.
 if "status" in chart_filters:
     chart_filters.pop("status", None)
-_sync_sidebar_filter_state_from_chart_filters(chart_filters)
 
 with st.sidebar:
     st.header("Filters")
@@ -653,7 +660,7 @@ with st.sidebar:
 with st.sidebar:
     st.markdown("---")
     if st.button("Clear Chart Selections", use_container_width=True):
-        st.session_state["chart_filters"] = {}
+        _clear_chart_and_synced_sidebar_filters()
         st.rerun()
 
 charts_base_df = filtered_df.copy()
@@ -746,7 +753,7 @@ if current_meta:
             st.write("Tabs Processed: " + ", ".join(tabs_processed))
 
 st.subheader("Fuel and Technology Mix")
-st.caption("Click chart items to toggle selection. Click a selected item again to unselect it.")
+st.caption("Click chart items to toggle selection, or drag a box to select tiny bars. Click selected items again to unselect.")
 chart_col_1, chart_col_2 = st.columns(2)
 fuel_chart_df = _apply_chart_filters(
     charts_base_df,
