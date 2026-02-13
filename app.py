@@ -462,15 +462,11 @@ if chart_filters.get("zone") and zone_col and zone_col in filtered_df.columns:
     selected_zone = set(chart_filters["zone"])
     filtered_df = filtered_df[filtered_df[zone_col].map(_normalize_filter_value).isin(selected_zone)]
 
-if chart_filters.get("cod_month") and cod_col and cod_col in filtered_df.columns:
-    selected_months = set(chart_filters["cod_month"])
-    cod_month = (
-        pd.to_datetime(filtered_df[cod_col], errors="coerce")
-        .dt.to_period("M")
-        .dt.to_timestamp()
-        .dt.strftime("%Y-%m-%d")
-    )
-    filtered_df = filtered_df[cod_month.isin(selected_months)]
+if chart_filters.get("cod_year") and cod_col and cod_col in filtered_df.columns:
+    selected_years = set(chart_filters["cod_year"])
+    cod_year = pd.to_datetime(filtered_df[cod_col], errors="coerce").dt.year
+    cod_year_text = cod_year.map(lambda value: str(int(value)) if pd.notna(value) else "Unknown")
+    filtered_df = filtered_df[cod_year_text.isin(selected_years)]
 
 if chart_filters:
     chart_filter_labels: list[str] = []
@@ -484,8 +480,8 @@ if chart_filters:
         chart_filter_labels.append("Developer (chart)")
     if "zone" in chart_filters:
         chart_filter_labels.append("Zone (chart)")
-    if "cod_month" in chart_filters:
-        chart_filter_labels.append("COD Month (chart)")
+    if "cod_year" in chart_filters:
+        chart_filter_labels.append("COD Year (chart)")
     active_filters.extend(chart_filter_labels)
 
 
@@ -664,116 +660,95 @@ if cod_col and cod_col in filtered_df.columns:
     cod_data = cod_data.dropna(subset=[cod_col])
 
     if not cod_data.empty:
-        cod_data["cod_month"] = cod_data[cod_col].dt.to_period("M").dt.to_timestamp()
+        cod_data["cod_year"] = cod_data[cod_col].dt.year.astype("int64")
         cod_totals = (
-            cod_data.groupby("cod_month", dropna=False)
+            cod_data.groupby("cod_year", dropna=False)
             .size()
             .reset_index(name="projects")
-            .sort_values("cod_month")
+            .sort_values("cod_year")
         )
 
         st.subheader("Totals by Expected COD")
         if capacity_col and capacity_col in cod_data.columns:
             cod_data[capacity_col] = pd.to_numeric(cod_data[capacity_col], errors="coerce")
             cod_capacity = (
-                cod_data.groupby("cod_month", dropna=False)[capacity_col]
+                cod_data.groupby("cod_year", dropna=False)[capacity_col]
                 .sum(min_count=1)
                 .reset_index()
             )
-            cod_totals = cod_totals.merge(cod_capacity, on="cod_month", how="left")
+            cod_totals = cod_totals.merge(cod_capacity, on="cod_year", how="left")
 
             cod_col_1, cod_col_2 = st.columns(2)
             cod_mw_fig = px.bar(
                 cod_totals,
-                x="cod_month",
+                x="cod_year",
                 y=capacity_col,
-                title="Total Capacity by Expected COD (MW)",
-                labels={capacity_col: "MW", "cod_month": "Expected COD Month"},
+                title="Total Capacity by Expected COD Year (MW)",
+                labels={capacity_col: "MW", "cod_year": "Expected COD Year"},
                 hover_data={"projects": True},
             )
             cod_mw_fig.update_layout(clickmode="event+select")
             cod_mw_event = cod_col_1.plotly_chart(
                 cod_mw_fig,
                 use_container_width=True,
-                key="expected_cod_mw_chart",
+                key="expected_cod_year_mw_chart",
                 on_select="rerun",
             )
-            cod_mw_selected_raw = _selected_values_from_event(cod_mw_event, "x")
-            cod_mw_selected = sorted(
-                {
-                    ts.strftime("%Y-%m-%d")
-                    for ts in pd.to_datetime(pd.Series(cod_mw_selected_raw), errors="coerce")
-                    if pd.notna(ts)
-                }
-            )
-            if _update_chart_filter("cod_month", cod_mw_selected):
+            cod_mw_selected = _selected_values_from_event(cod_mw_event, "x")
+            if _update_chart_filter("cod_year", cod_mw_selected):
                 st.rerun()
 
             cod_count_fig = px.bar(
                 cod_totals,
-                x="cod_month",
+                x="cod_year",
                 y="projects",
-                title="Total Projects by Expected COD",
-                labels={"projects": "Projects", "cod_month": "Expected COD Month"},
+                title="Total Projects by Expected COD Year",
+                labels={"projects": "Projects", "cod_year": "Expected COD Year"},
                 hover_data={capacity_col: ":,.2f"},
             )
             cod_count_fig.update_layout(clickmode="event+select")
             cod_count_event = cod_col_2.plotly_chart(
                 cod_count_fig,
                 use_container_width=True,
-                key="expected_cod_projects_chart",
+                key="expected_cod_year_projects_chart",
                 on_select="rerun",
             )
-            cod_count_selected_raw = _selected_values_from_event(cod_count_event, "x")
-            cod_count_selected = sorted(
-                {
-                    ts.strftime("%Y-%m-%d")
-                    for ts in pd.to_datetime(pd.Series(cod_count_selected_raw), errors="coerce")
-                    if pd.notna(ts)
-                }
-            )
-            if _update_chart_filter("cod_month", cod_count_selected):
+            cod_count_selected = _selected_values_from_event(cod_count_event, "x")
+            if _update_chart_filter("cod_year", cod_count_selected):
                 st.rerun()
 
             cod_totals["cumulative_capacity_mw"] = cod_totals[capacity_col].fillna(0).cumsum()
             timeline_fig = px.line(
                 cod_totals,
-                x="cod_month",
+                x="cod_year",
                 y="cumulative_capacity_mw",
-                title="Cumulative Planned Capacity by Expected COD",
+                title="Cumulative Planned Capacity by Expected COD Year",
             )
         else:
             cod_count_fig = px.bar(
                 cod_totals,
-                x="cod_month",
+                x="cod_year",
                 y="projects",
-                title="Total Projects by Expected COD",
-                labels={"projects": "Projects", "cod_month": "Expected COD Month"},
+                title="Total Projects by Expected COD Year",
+                labels={"projects": "Projects", "cod_year": "Expected COD Year"},
             )
             cod_count_fig.update_layout(clickmode="event+select")
             cod_count_event = st.plotly_chart(
                 cod_count_fig,
                 use_container_width=True,
-                key="expected_cod_projects_chart",
+                key="expected_cod_year_projects_chart",
                 on_select="rerun",
             )
-            cod_count_selected_raw = _selected_values_from_event(cod_count_event, "x")
-            cod_count_selected = sorted(
-                {
-                    ts.strftime("%Y-%m-%d")
-                    for ts in pd.to_datetime(pd.Series(cod_count_selected_raw), errors="coerce")
-                    if pd.notna(ts)
-                }
-            )
-            if _update_chart_filter("cod_month", cod_count_selected):
+            cod_count_selected = _selected_values_from_event(cod_count_event, "x")
+            if _update_chart_filter("cod_year", cod_count_selected):
                 st.rerun()
 
             cod_totals["cumulative_projects"] = cod_totals["projects"].cumsum()
             timeline_fig = px.line(
                 cod_totals,
-                x="cod_month",
+                x="cod_year",
                 y="cumulative_projects",
-                title="Cumulative Projects by Expected COD",
+                title="Cumulative Projects by Expected COD Year",
             )
 
         timeline_fig.update_layout(clickmode="event+select")
@@ -783,15 +758,8 @@ if cod_col and cod_col in filtered_df.columns:
             key="timeline_chart",
             on_select="rerun",
         )
-        timeline_selected_raw = _selected_values_from_event(timeline_event, "x")
-        timeline_selected = sorted(
-            {
-                ts.strftime("%Y-%m-%d")
-                for ts in pd.to_datetime(pd.Series(timeline_selected_raw), errors="coerce")
-                if pd.notna(ts)
-            }
-        )
-        if _update_chart_filter("cod_month", timeline_selected):
+        timeline_selected = _selected_values_from_event(timeline_event, "x")
+        if _update_chart_filter("cod_year", timeline_selected):
             st.rerun()
 
 
