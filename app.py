@@ -198,10 +198,15 @@ if current_meta:
     st.caption(
         "Source: "
         f"{current_meta.get('source', 'unknown')} | "
-        f"Report Type ID: {current_meta.get('report_type_id', 'n/a')}"
+        f"Report Type ID: {current_meta.get('report_type_id', 'n/a')} | "
+        f"Tabs Processed: {current_meta.get('tab_count', 'n/a')}"
     )
     st.caption(f"Data Product URL: {current_meta.get('data_product_url', 'n/a')}")
     st.caption(f"Latest GIS URL: {current_meta.get('source_url', 'n/a')}")
+    tabs_processed = current_meta.get("tabs_processed")
+    if isinstance(tabs_processed, list) and tabs_processed:
+        with st.expander("Tabs Processed In Latest Pull", expanded=False):
+            st.write(", ".join(tabs_processed))
 
 chart_col_1, chart_col_2 = st.columns(2)
 
@@ -420,6 +425,7 @@ if history:
             "source_url",
             "data_product_url",
             "report_type_id",
+            "tab_count",
             "diff_summary",
         ]
         if col in history_df.columns

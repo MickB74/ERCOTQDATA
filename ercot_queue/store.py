@@ -62,6 +62,8 @@ def save_snapshot(
         "index_url": source_metadata.get("index_url"),
         "data_product_url": source_metadata.get("data_product_url"),
         "report_type_id": source_metadata.get("report_type_id"),
+        "tab_count": source_metadata.get("tab_count"),
+        "tabs_processed": source_metadata.get("tabs_processed"),
         "diff_summary": diff_report.get("summary", {}),
     }
 

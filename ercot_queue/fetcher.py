@@ -23,7 +23,28 @@ DATA_EXTENSIONS = (".csv", ".xls", ".xlsx", ".zip")
 DATE_PATTERNS = [
     re.compile(r"(20\d{2})[-_/](\d{1,2})[-_/](\d{1,2})"),
     re.compile(r"(\d{1,2})[-_/](\d{1,2})[-_/](20\d{2})"),
+    re.compile(r"(20\d{2})(\d{2})(\d{2})"),
 ]
+MONTH_NAME_PATTERN = re.compile(
+    r"(jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|"
+    r"sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)[-_ ]*(20\d{2})",
+    flags=re.IGNORECASE,
+)
+MONTH_TO_INT = {
+    "jan": 1,
+    "feb": 2,
+    "mar": 3,
+    "apr": 4,
+    "may": 5,
+    "jun": 6,
+    "jul": 7,
+    "aug": 8,
+    "sep": 9,
+    "oct": 10,
+    "nov": 11,
+    "dec": 12,
+}
+MAX_HEADER_SCAN_ROWS = 60
 
 
 def fetch_latest_ercot_queue(custom_url: str | None = None) -> tuple[pd.DataFrame, dict[str, Any]]:
@@ -36,15 +57,16 @@ def fetch_latest_ercot_queue(custom_url: str | None = None) -> tuple[pd.DataFram
             index_url, product_meta = discover_report_index_from_product_page(custom_url)
             report_url = discover_latest_report_url(index_url)
             df = _download_table(report_url)
-            source_meta = {
+            base_meta = {
                 "source": "ercot_data_product",
                 "source_url": report_url,
                 "index_url": index_url,
                 **product_meta,
             }
+            source_meta = _attach_tab_metadata(df, base_meta)
         else:
             df = _download_table(custom_url)
-            source_meta = {"source": "ercot_custom", "source_url": custom_url}
+            source_meta = _attach_tab_metadata(df, {"source": "ercot_custom", "source_url": custom_url})
 
         if df.empty:
             raise RuntimeError(f"Custom ERCOT URL returned no rows: {custom_url}")
@@ -66,12 +88,12 @@ def fetch_latest_ercot_queue(custom_url: str | None = None) -> tuple[pd.DataFram
 
             df = _download_table(report_url)
             if not df.empty:
-                return df, {
+                return df, _attach_tab_metadata(df, {
                     "source": "ercot_data_product",
                     "source_url": report_url,
                     "index_url": index_url,
                     **product_meta,
-                }
+                })
         except Exception as exc:  # pylint: disable=broad-except
             errors.append(f"{product_url}: {exc}")
 
@@ -89,11 +111,11 @@ def fetch_latest_ercot_queue(custom_url: str | None = None) -> tuple[pd.DataFram
 
             df = _download_table(report_url)
             if not df.empty:
-                return df, {
+                return df, _attach_tab_metadata(df, {
                     "source": "ercot_mis",
                     "source_url": report_url,
                     "index_url": index_url,
-                }
+                })
         except Exception as exc:  # pylint: disable=broad-except
             errors.append(f"{index_url}: {exc}")
 
@@ -135,12 +157,10 @@ def discover_latest_report_url(index_url: str) -> str:
 
     candidates = _extract_report_candidates(html_text, effective_url)
     candidates = [candidate for candidate in candidates if _is_ercot_url(str(candidate["url"]))]
-    
     if not candidates:
         raise RuntimeError("No ERCOT report links found on ERCOT index page")
 
-    candidates.sort(key=lambda item: (item["date"], item["score"], -item["position"]), reverse=True)
-    return str(candidates[0]["url"])
+    return str(_select_best_candidate(candidates)["url"])
 
 
 def _fetch_url(url: str, timeout: int = REQUEST_TIMEOUT_SECONDS) -> tuple[bytes, str, str]:
@@ -199,18 +219,8 @@ def _extract_report_candidates(html: str, base_url: str) -> list[dict[str, Any]]
     results: list[dict[str, Any]] = []
     seen: set[str] = set()
 
-    # First pass: Look for links within table rows to capture context
-    for tr in soup.find_all("tr"):
-        row_text = " ".join(tr.get_text(" ", strip=True).split())
-        for anchor in tr.find_all("a"):
-            _process_anchor(anchor, base_url, seen, results, context_text=row_text)
-
-    # Second pass: Look for any remaining links not in tables (e.g. simple lists)
     for anchor in soup.find_all("a"):
-         # fast check to see if we already processed this specific tag? 
-         # difficult without unique IDs. 
-         # Simpler: just process everything, _process_anchor checks 'seen' set.
-         _process_anchor(anchor, base_url, seen, results)
+        _process_anchor(anchor, base_url, seen, results)
 
     return results
 
@@ -219,8 +229,7 @@ def _process_anchor(
     anchor: Any, 
     base_url: str, 
     seen: set[str], 
-    results: list[dict[str, Any]], 
-    context_text: str = ""
+    results: list[dict[str, Any]],
 ) -> None:
     href = (anchor.get("href") or "").strip()
     link_text = " ".join(anchor.get_text(" ", strip=True).split())
@@ -230,10 +239,9 @@ def _process_anchor(
 
     abs_url = urljoin(base_url, href)
     normalized = abs_url.lower()
-    
-    # Combined label includes the link text AND the row context
-    # This ensures "GIS Report" in the row boosts the "xlsx" link score
-    label = f"{context_text} {link_text}".strip()
+
+    context_text = _derive_anchor_context(anchor)
+    label = " ".join(part for part in (context_text, link_text) if part).strip()
     label_lower = label.lower()
 
     if "reporttypeid=" in normalized:
@@ -258,6 +266,28 @@ def _process_anchor(
         }
     )
     seen.add(normalized)
+
+
+def _derive_anchor_context(anchor: Any) -> str:
+    contexts: list[str] = []
+
+    for tr in anchor.find_parents("tr"):
+        tr_text = " ".join(tr.get_text(" ", strip=True).split())
+        if tr_text:
+            contexts.append(tr_text)
+
+    if contexts:
+        # Use the smallest enclosing row to avoid grabbing entire table text.
+        shortest = min(contexts, key=len)
+        return shortest[:600]
+
+    parent = anchor.parent
+    if parent is not None:
+        parent_text = " ".join(parent.get_text(" ", strip=True).split())
+        if parent_text:
+            return parent_text[:600]
+
+    return ""
 
 
 def _looks_like_report_link(url_lower: str, label_lower: str) -> bool:
@@ -308,16 +338,25 @@ def _score_candidate(url_lower: str, label_lower: str) -> int:
 
 
 def _parse_date(value: str) -> datetime | None:
+    month_match = MONTH_NAME_PATTERN.search(value)
+    if month_match:
+        month_name, year_text = month_match.groups()
+        month = MONTH_TO_INT.get(month_name[:3].lower())
+        if month:
+            return datetime(int(year_text), month, 1)
+
     for pattern in DATE_PATTERNS:
         match = pattern.search(value)
         if not match:
             continue
 
         parts = [int(part) for part in match.groups()]
-        if parts[0] > 1900:
+        if len(parts) == 3 and parts[0] > 1900 and parts[1] <= 12 and parts[2] <= 31:
             year, month, day = parts
-        else:
+        elif len(parts) == 3:
             month, day, year = parts
+        else:
+            continue
 
         try:
             return datetime(year, month, day)
@@ -349,8 +388,8 @@ def _download_table(url: str, depth: int = 0) -> pd.DataFrame:
         nested_candidates = _extract_report_candidates(html_text, effective_url)
         nested_candidates = [candidate for candidate in nested_candidates if _is_ercot_url(str(candidate["url"]))]
         if nested_candidates:
-            nested_candidates.sort(key=lambda item: (item["date"], item["score"], -item["position"]), reverse=True)
-            return _download_table(str(nested_candidates[0]["url"]), depth=depth + 1)
+            best_nested = _select_best_candidate(nested_candidates)
+            return _download_table(str(best_nested["url"]), depth=depth + 1)
 
         raise RuntimeError(f"URL did not return tabular data: {effective_url}")
 
@@ -402,52 +441,65 @@ def _read_excel_with_fallbacks(content: bytes) -> pd.DataFrame:
     all_dataframes: list[pd.DataFrame] = []
 
     for sheet_name in xls.sheet_names:
-        # Skip known non-data sheets
-        if re.search(r"cover|disclaimer|acronym|summary|contents|notes|legend|history", sheet_name, re.IGNORECASE):
+        sheet_df, header_row, header_score = _read_sheet_best_effort(xls, sheet_name)
+        if sheet_df.empty:
             continue
 
-        sheet_best_score = -1
-        sheet_best_df = pd.DataFrame()
+        cleaned = sheet_df.dropna(axis=1, how="all").dropna(axis=0, how="all")
+        if cleaned.empty:
+            continue
 
-        # Try a few common header positions, searching deeper for "Project Details" sheets
-        for header_row in range(100):
-            try:
-                df = pd.read_excel(xls, sheet_name=sheet_name, header=header_row)
-            except Exception:
-                continue
-
-            if df is None or df.empty:
-                continue
-
-            # Check if this looks like a project list
-            score = _score_table_columns(df.columns)
-            if score > sheet_best_score:
-                sheet_best_score = score
-                sheet_best_df = df
-
-        if sheet_best_score >= 10:  # Must have at least a Queue ID to be considered
-            cleaned = sheet_best_df.dropna(axis=1, how="all").dropna(axis=0, how="all")
-            if not cleaned.empty:
-                cleaned["_source_sheet"] = sheet_name
-                all_dataframes.append(cleaned)
+        cleaned["_source_sheet"] = sheet_name
+        cleaned["_source_header_row"] = header_row
+        cleaned["_source_header_score"] = header_score
+        all_dataframes.append(cleaned)
 
     if not all_dataframes:
-        # Final fallback: if no sheet scored well, just take the biggest one as before
-        candidate_tables: list[tuple[int, pd.DataFrame]] = []
-        for sheet_name in xls.sheet_names:
-            try:
-                df = pd.read_excel(xls, sheet_name=sheet_name)
-                if not df.empty:
-                    candidate_tables.append((len(df), df))
-            except Exception:
-                continue
-        if candidate_tables:
-            candidate_tables.sort(key=lambda item: item[0], reverse=True)
-            return candidate_tables[0][1]
         return pd.DataFrame()
 
-    # Consolidate all project-bearing sheets
+    # Consolidate all parsed sheets (all tabs processed)
     return pd.concat(all_dataframes, ignore_index=True, sort=False)
+
+
+def _read_sheet_best_effort(xls: pd.ExcelFile, sheet_name: str) -> tuple[pd.DataFrame, int, int]:
+    best_df = pd.DataFrame()
+    best_score = -1
+    best_header_row = 0
+
+    for header_row in range(MAX_HEADER_SCAN_ROWS):
+        try:
+            df = pd.read_excel(xls, sheet_name=sheet_name, header=header_row)
+        except Exception:
+            continue
+
+        if df is None or df.empty:
+            continue
+
+        cleaned = df.dropna(axis=1, how="all").dropna(axis=0, how="all")
+        if cleaned.empty:
+            continue
+
+        header_score = _score_table_columns(cleaned.columns)
+        width_bonus = min(len(cleaned.columns), 40)
+        row_bonus = min(len(cleaned), 500) // 50
+        score = header_score * 100 + width_bonus + row_bonus
+
+        if score > best_score:
+            best_score = score
+            best_df = cleaned
+            best_header_row = header_row
+
+    if not best_df.empty:
+        return best_df, best_header_row, best_score
+
+    try:
+        fallback = pd.read_excel(xls, sheet_name=sheet_name, header=0)
+        fallback = fallback.dropna(axis=1, how="all").dropna(axis=0, how="all")
+        if fallback.empty:
+            return pd.DataFrame(), 0, -1
+        return fallback, 0, _score_table_columns(fallback.columns)
+    except Exception:
+        return pd.DataFrame(), 0, -1
 
 
 def _score_table_columns(columns: Any) -> int:
@@ -470,6 +522,25 @@ def _score_table_columns(columns: Any) -> int:
     return score
 
 
+def _is_gis_candidate(candidate: dict[str, Any]) -> bool:
+    url_text = str(candidate.get("url", "")).lower()
+    label_text = str(candidate.get("label", "")).lower()
+    combined = f"{url_text} {label_text}"
+    return (
+        "gis_report" in combined
+        or "gis report" in combined
+        or "generation interconnection status" in combined
+        or bool(re.search(r"\bgis\b", combined))
+    )
+
+
+def _select_best_candidate(candidates: list[dict[str, Any]]) -> dict[str, Any]:
+    gis_candidates = [candidate for candidate in candidates if _is_gis_candidate(candidate)]
+    pool = gis_candidates if gis_candidates else candidates
+    ranked = sorted(pool, key=lambda item: (item["date"], item["score"], -item["position"]), reverse=True)
+    return ranked[0]
+
+
 def _read_csv_with_fallbacks(content: bytes) -> pd.DataFrame:
     errors: list[str] = []
     for encoding in ("utf-8", "utf-8-sig", "latin-1"):
@@ -479,6 +550,16 @@ def _read_csv_with_fallbacks(content: bytes) -> pd.DataFrame:
             errors.append(f"{encoding}: {exc}")
 
     raise RuntimeError("Could not parse CSV data. " + " | ".join(errors))
+
+
+def _attach_tab_metadata(df: pd.DataFrame, base_meta: dict[str, Any]) -> dict[str, Any]:
+    meta = dict(base_meta)
+    source_col = "_source_sheet"
+    if source_col in df.columns:
+        tabs = sorted({str(tab) for tab in df[source_col].dropna().astype(str)})
+        meta["tab_count"] = len(tabs)
+        meta["tabs_processed"] = tabs
+    return meta
 
 
 def _assert_ercot_url(url: str, label: str) -> None:

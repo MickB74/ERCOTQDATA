@@ -50,7 +50,9 @@ streamlit run app.py
 ## Notes
 
 - Auto-fetch starts at ERCOT data product page `PG7-200-ER`, derives `Report Type ID`, then pulls the latest GIS file from ERCOT MIS.
-- If auto-discovery fails, paste an ERCOT `data-product-details` URL or direct ERCOT CSV/XLS/XLSX/ZIP URL into `Custom ERCOT file URL` and refresh.
+- GIS file selection explicitly prefers the latest `GIS_Report_*` entry (for example `GIS_Report_January2026`) over non-GIS companion files.
+- Excel ingestion processes all workbook tabs and records tab names/count in snapshot metadata.
+- If auto-discovery fails, paste an ERCOT `data-product-details` URL or direct ERCOT CSV/XLS/XLSX/ZIP URL into `ERCOT Source URL` and refresh.
 - All pull timestamps are stored in UTC.
 
 ## Optional Environment Variables
