@@ -403,6 +403,7 @@ def _apply_operating_chart_filters(
     *,
     fuel_col: str | None,
     status_col: str | None,
+    zone_col: str | None,
     exclude_key: str | None = None,
 ) -> pd.DataFrame:
     filtered = df
@@ -413,6 +414,10 @@ def _apply_operating_chart_filters(
     if exclude_key != "status" and chart_filters.get("status") and status_col and status_col in filtered.columns:
         selected_status = set(chart_filters["status"])
         filtered = filtered[filtered[status_col].map(_normalize_filter_value).isin(selected_status)]
+
+    if exclude_key != "zone" and chart_filters.get("zone") and zone_col and zone_col in filtered.columns:
+        selected_zone = set(chart_filters["zone"])
+        filtered = filtered[filtered[zone_col].map(_normalize_filter_value).isin(selected_zone)]
 
     return filtered
 
@@ -633,12 +638,15 @@ def _render_operating_assets_view() -> None:
         operating_chart_filters.pop("fuel", None)
     if not status_col or status_col not in filtered_assets.columns:
         operating_chart_filters.pop("status", None)
+    if not zone_col or zone_col not in filtered_assets.columns:
+        operating_chart_filters.pop("zone", None)
     operating_charts_base_df = filtered_assets.copy()
     filtered_assets = _apply_operating_chart_filters(
         filtered_assets,
         operating_chart_filters,
         fuel_col=fuel_col,
         status_col=status_col,
+        zone_col=zone_col,
     )
 
     with st.sidebar:
@@ -704,6 +712,8 @@ def _render_operating_assets_view() -> None:
             labels.append("Fuel")
         if operating_chart_filters.get("status"):
             labels.append("Status")
+        if operating_chart_filters.get("zone"):
+            labels.append("Reporting Zone")
         if labels:
             st.caption("Active chart filters: " + ", ".join(labels))
 
@@ -735,19 +745,34 @@ def _render_operating_assets_view() -> None:
 
     chart_col_1, chart_col_2 = st.columns(2)
     st.caption("Click chart items to toggle selection, or drag a box to select multiple bars.")
+
+    secondary_filter_key = None
+    secondary_col = None
+    secondary_label = None
+    if status_col and status_col in operating_charts_base_df.columns:
+        secondary_filter_key = "status"
+        secondary_col = status_col
+        secondary_label = "Status"
+    elif zone_col and zone_col in operating_charts_base_df.columns:
+        secondary_filter_key = "zone"
+        secondary_col = zone_col
+        secondary_label = "Reporting Zone"
+
     fuel_chart_df = _apply_operating_chart_filters(
         operating_charts_base_df,
         operating_chart_filters,
         fuel_col=fuel_col,
         status_col=status_col,
+        zone_col=zone_col,
         exclude_key="fuel",
     )
-    status_chart_df = _apply_operating_chart_filters(
+    secondary_chart_df = _apply_operating_chart_filters(
         operating_charts_base_df,
         operating_chart_filters,
         fuel_col=fuel_col,
         status_col=status_col,
-        exclude_key="status",
+        zone_col=zone_col,
+        exclude_key=secondary_filter_key,
     )
 
     if fuel_col and fuel_col in fuel_chart_df.columns:
@@ -756,7 +781,7 @@ def _render_operating_assets_view() -> None:
             .size()
             .reset_index(name="assets")
             .sort_values("assets", ascending=False)
-            .head(20)
+            .head(15)
         )
         fuel_plot, fuel_color_col = _apply_selection_highlight(
             fuel_plot,
@@ -772,13 +797,15 @@ def _render_operating_assets_view() -> None:
             }
         fuel_fig = px.bar(
             fuel_plot,
-            x=fuel_col,
-            y="assets",
-            title="Operating Assets by Fuel",
+            x="assets",
+            y=fuel_col,
+            orientation="h",
+            title="Operating Assets by Fuel (Count)",
+            labels={"assets": "Assets", fuel_col: "Fuel"},
             **fuel_chart_kwargs,
         )
-        fuel_fig.update_layout(clickmode="event+select")
-        _style_chart(fuel_fig)
+        fuel_fig.update_layout(clickmode="event+select", yaxis={"categoryorder": "total ascending"})
+        _style_chart(fuel_fig, x_tick_angle=0)
         fuel_event = chart_col_1.plotly_chart(
             fuel_fig,
             use_container_width=True,
@@ -786,61 +813,68 @@ def _render_operating_assets_view() -> None:
             on_select="rerun",
             selection_mode=("points", "box", "lasso"),
         )
-        fuel_selected = _selected_values_from_event(fuel_event, "x")
+        fuel_selected = _selected_values_from_event(fuel_event, "y")
         if _update_operating_chart_filter("fuel", "op_fuel_chart", fuel_selected, event=fuel_event):
             st.rerun()
     else:
         chart_col_1.info("Fuel column not detected in operating assets sheet.")
 
-    if status_col and status_col in status_chart_df.columns:
-        status_plot = (
-            status_chart_df.groupby(status_col, dropna=False)
+    if secondary_filter_key and secondary_col and secondary_label and secondary_col in secondary_chart_df.columns:
+        secondary_plot = (
+            secondary_chart_df.groupby(secondary_col, dropna=False)
             .size()
             .reset_index(name="assets")
             .sort_values("assets", ascending=False)
-            .head(20)
+            .head(15)
         )
-        status_plot, status_color_col = _apply_selection_highlight(
-            status_plot,
-            status_col,
-            operating_chart_filters.get("status", []),
+        secondary_plot, secondary_color_col = _apply_selection_highlight(
+            secondary_plot,
+            secondary_col,
+            operating_chart_filters.get(secondary_filter_key, []),
         )
-        status_chart_kwargs: dict[str, Any] = {}
-        if status_color_col:
-            status_chart_kwargs = {
-                "color": status_color_col,
+        secondary_chart_kwargs: dict[str, Any] = {}
+        if secondary_color_col:
+            secondary_chart_kwargs = {
+                "color": secondary_color_col,
                 "color_discrete_map": {"Selected": "#4C78A8", "Other": "#9AA4B2"},
-                "category_orders": {status_color_col: ["Selected", "Other"]},
+                "category_orders": {secondary_color_col: ["Selected", "Other"]},
             }
-        status_fig = px.bar(
-            status_plot,
-            x=status_col,
-            y="assets",
-            title="Operating Assets by Status",
-            **status_chart_kwargs,
+        secondary_fig = px.bar(
+            secondary_plot,
+            x="assets",
+            y=secondary_col,
+            orientation="h",
+            title=f"Operating Assets by {secondary_label} (Count)",
+            labels={"assets": "Assets", secondary_col: secondary_label},
+            **secondary_chart_kwargs,
         )
-        status_fig.update_layout(clickmode="event+select")
-        _style_chart(status_fig)
-        status_event = chart_col_2.plotly_chart(
-            status_fig,
+        secondary_fig.update_layout(clickmode="event+select", yaxis={"categoryorder": "total ascending"})
+        _style_chart(secondary_fig, x_tick_angle=0)
+        secondary_event = chart_col_2.plotly_chart(
+            secondary_fig,
             use_container_width=True,
-            key="op_status_chart",
+            key=f"op_{secondary_filter_key}_chart",
             on_select="rerun",
             selection_mode=("points", "box", "lasso"),
         )
-        status_selected = _selected_values_from_event(status_event, "x")
-        if _update_operating_chart_filter("status", "op_status_chart", status_selected, event=status_event):
+        secondary_selected = _selected_values_from_event(secondary_event, "y")
+        if _update_operating_chart_filter(
+            secondary_filter_key,
+            f"op_{secondary_filter_key}_chart",
+            secondary_selected,
+            event=secondary_event,
+        ):
             st.rerun()
     else:
-        chart_col_2.info("Status column not detected in operating assets sheet.")
+        chart_col_2.info("Status/Reporting Zone columns not detected in operating assets sheet.")
 
     st.subheader("Operating Capacity by MW")
     mw_chart_col_1, mw_chart_col_2 = st.columns(2)
     if capacity_col and capacity_col in filtered_assets.columns:
         fuel_mw_df = fuel_chart_df.copy()
-        status_mw_df = status_chart_df.copy()
+        secondary_mw_df = secondary_chart_df.copy()
         fuel_mw_df[capacity_col] = pd.to_numeric(fuel_mw_df[capacity_col], errors="coerce")
-        status_mw_df[capacity_col] = pd.to_numeric(status_mw_df[capacity_col], errors="coerce")
+        secondary_mw_df[capacity_col] = pd.to_numeric(secondary_mw_df[capacity_col], errors="coerce")
 
         if fuel_col and fuel_col in fuel_mw_df.columns:
             fuel_mw_plot = (
@@ -848,7 +882,7 @@ def _render_operating_assets_view() -> None:
                 .sum(min_count=1)
                 .reset_index()
                 .sort_values(capacity_col, ascending=False)
-                .head(20)
+                .head(15)
             )
             fuel_mw_plot, fuel_mw_color_col = _apply_selection_highlight(
                 fuel_mw_plot,
@@ -864,14 +898,15 @@ def _render_operating_assets_view() -> None:
                 }
             fuel_mw_fig = px.bar(
                 fuel_mw_plot,
-                x=fuel_col,
-                y=capacity_col,
+                x=capacity_col,
+                y=fuel_col,
+                orientation="h",
                 title="Operating Capacity by Fuel (MW)",
-                labels={capacity_col: "MW"},
+                labels={capacity_col: "MW", fuel_col: "Fuel"},
                 **fuel_mw_chart_kwargs,
             )
-            fuel_mw_fig.update_layout(clickmode="event+select")
-            _style_chart(fuel_mw_fig)
+            fuel_mw_fig.update_layout(clickmode="event+select", yaxis={"categoryorder": "total ascending"})
+            _style_chart(fuel_mw_fig, x_tick_angle=0)
             fuel_mw_event = mw_chart_col_1.plotly_chart(
                 fuel_mw_fig,
                 use_container_width=True,
@@ -879,54 +914,60 @@ def _render_operating_assets_view() -> None:
                 on_select="rerun",
                 selection_mode=("points", "box", "lasso"),
             )
-            fuel_mw_selected = _selected_values_from_event(fuel_mw_event, "x")
+            fuel_mw_selected = _selected_values_from_event(fuel_mw_event, "y")
             if _update_operating_chart_filter("fuel", "op_fuel_mw_chart", fuel_mw_selected, event=fuel_mw_event):
                 st.rerun()
         else:
             mw_chart_col_1.info("Fuel column not detected in operating assets sheet.")
 
-        if status_col and status_col in status_mw_df.columns:
-            status_mw_plot = (
-                status_mw_df.groupby(status_col, dropna=False)[capacity_col]
+        if secondary_filter_key and secondary_col and secondary_label and secondary_col in secondary_mw_df.columns:
+            secondary_mw_plot = (
+                secondary_mw_df.groupby(secondary_col, dropna=False)[capacity_col]
                 .sum(min_count=1)
                 .reset_index()
                 .sort_values(capacity_col, ascending=False)
-                .head(20)
+                .head(15)
             )
-            status_mw_plot, status_mw_color_col = _apply_selection_highlight(
-                status_mw_plot,
-                status_col,
-                operating_chart_filters.get("status", []),
+            secondary_mw_plot, secondary_mw_color_col = _apply_selection_highlight(
+                secondary_mw_plot,
+                secondary_col,
+                operating_chart_filters.get(secondary_filter_key, []),
             )
-            status_mw_chart_kwargs: dict[str, Any] = {}
-            if status_mw_color_col:
-                status_mw_chart_kwargs = {
-                    "color": status_mw_color_col,
+            secondary_mw_chart_kwargs: dict[str, Any] = {}
+            if secondary_mw_color_col:
+                secondary_mw_chart_kwargs = {
+                    "color": secondary_mw_color_col,
                     "color_discrete_map": {"Selected": "#4C78A8", "Other": "#9AA4B2"},
-                    "category_orders": {status_mw_color_col: ["Selected", "Other"]},
+                    "category_orders": {secondary_mw_color_col: ["Selected", "Other"]},
                 }
-            status_mw_fig = px.bar(
-                status_mw_plot,
-                x=status_col,
-                y=capacity_col,
-                title="Operating Capacity by Status (MW)",
-                labels={capacity_col: "MW"},
-                **status_mw_chart_kwargs,
+            secondary_mw_fig = px.bar(
+                secondary_mw_plot,
+                x=capacity_col,
+                y=secondary_col,
+                orientation="h",
+                title=f"Operating Capacity by {secondary_label} (MW)",
+                labels={capacity_col: "MW", secondary_col: secondary_label},
+                **secondary_mw_chart_kwargs,
             )
-            status_mw_fig.update_layout(clickmode="event+select")
-            _style_chart(status_mw_fig)
-            status_mw_event = mw_chart_col_2.plotly_chart(
-                status_mw_fig,
+            secondary_mw_fig.update_layout(clickmode="event+select", yaxis={"categoryorder": "total ascending"})
+            _style_chart(secondary_mw_fig, x_tick_angle=0)
+            secondary_mw_event = mw_chart_col_2.plotly_chart(
+                secondary_mw_fig,
                 use_container_width=True,
-                key="op_status_mw_chart",
+                key=f"op_{secondary_filter_key}_mw_chart",
                 on_select="rerun",
                 selection_mode=("points", "box", "lasso"),
             )
-            status_mw_selected = _selected_values_from_event(status_mw_event, "x")
-            if _update_operating_chart_filter("status", "op_status_mw_chart", status_mw_selected, event=status_mw_event):
+            secondary_mw_selected = _selected_values_from_event(secondary_mw_event, "y")
+            if _update_operating_chart_filter(
+                secondary_filter_key,
+                f"op_{secondary_filter_key}_mw_chart",
+                secondary_mw_selected,
+                event=secondary_mw_event,
+            ):
                 st.rerun()
         else:
-            mw_chart_col_2.info("Status column not detected in operating assets sheet.")
+            mw_chart_col_2.info("Status/Reporting Zone columns not detected in operating assets sheet.")
     else:
         mw_chart_col_1.info("Capacity (MW) column not detected in operating assets sheet.")
         mw_chart_col_2.info("Capacity (MW) column not detected in operating assets sheet.")
