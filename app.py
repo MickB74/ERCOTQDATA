@@ -1,6 +1,7 @@
 import streamlit as st
 import pandas as pd
 import plotly.express as px
+import re
 from datetime import datetime
 from typing import Any
 from urllib.parse import parse_qs, urlparse
@@ -10,9 +11,11 @@ try:
     from ercot_queue.config import DEFAULT_DATA_PRODUCT_URLS, MAX_CHANGE_SAMPLE_ROWS
     from ercot_queue.diffing import calculate_diff
     from ercot_queue.fetcher import (
+        DEFAULT_OPERATING_ASSETS_INDEX_URL,
         discover_latest_report_url,
         discover_report_index_from_product_page,
         fetch_latest_ercot_queue,
+        fetch_latest_operating_assets,
         fetch_summary_under_study_mw,
     )
     from ercot_queue.processing import infer_semantic_columns, prepare_queue_dataframe
@@ -71,6 +74,11 @@ def _format_timestamp(raw_ts: str) -> str:
 @st.cache_data(ttl=60 * 30, show_spinner=False)
 def _cached_fetch_under_study_capacity(source_url: str) -> float | None:
     return fetch_summary_under_study_mw(source_url)
+
+
+@st.cache_data(ttl=60 * 30, show_spinner=False)
+def _cached_fetch_operating_assets(index_url: str) -> tuple[pd.DataFrame, dict]:
+    return fetch_latest_operating_assets(index_url)
 
 
 def _map_code_to_name(value: object, crosswalk: dict[str, str]) -> str | None:
@@ -216,6 +224,17 @@ def _event_has_selection(event: object) -> bool:
     return getattr(event, "selection", None) is not None
 
 
+def _toggle_values(existing_values: list[str], clicked_values: list[str]) -> list[str]:
+    updated_values = set(existing_values)
+    for value in clicked_values:
+        normalized = _normalize_filter_value(value)
+        if normalized in updated_values:
+            updated_values.remove(normalized)
+        else:
+            updated_values.add(normalized)
+    return sorted(updated_values)
+
+
 def _update_chart_filter(
     filter_key: str,
     chart_id: str,
@@ -233,16 +252,39 @@ def _update_chart_filter(
         return False
     chart_selection_state[chart_id] = normalized_values
 
-    chart_filters = st.session_state.setdefault("chart_filters", {})
-    existing_values = chart_filters.get(filter_key, [])
-    merged_values = normalized_values
-    if existing_values == merged_values:
+    if filter_key == "cod_year":
+        chart_filters = st.session_state.setdefault("chart_filters", {})
+        existing_values = chart_filters.get(filter_key, [])
+        merged_values = _toggle_values(existing_values, normalized_values)
+        if existing_values == merged_values:
+            return False
+        if merged_values:
+            chart_filters[filter_key] = merged_values
+        else:
+            chart_filters.pop(filter_key, None)
+        return True
+
+    chart_to_sidebar_key = {
+        "fuel": "fuel",
+        "technology": "technology",
+        "developer": "developer",
+        "zone": "reporting_zone",
+    }
+    sidebar_key = chart_to_sidebar_key.get(filter_key)
+    if not sidebar_key:
         return False
 
-    if merged_values:
-        chart_filters[filter_key] = merged_values
+    all_key = f"all_{sidebar_key}"
+    select_key = f"select_{sidebar_key}"
+    if st.session_state.get(all_key, True):
+        existing_values = []
     else:
-        chart_filters.pop(filter_key, None)
+        selected = st.session_state.get(select_key, [])
+        existing_values = sorted({_normalize_filter_value(value) for value in selected}) if isinstance(selected, list) else []
+
+    merged_values = _toggle_values(existing_values, normalized_values)
+    if existing_values == merged_values:
+        return False
 
     _queue_sidebar_sync_from_chart(filter_key, merged_values)
     return True
@@ -384,6 +426,135 @@ def _resolve_latest_source_url(user_url: str) -> str:
     return text
 
 
+def _first_matching_column(columns: list[str], patterns: list[str]) -> str | None:
+    lowered = {column.lower(): column for column in columns}
+    for pattern in patterns:
+        for lower, original in lowered.items():
+            if re.search(pattern, lower):
+                return original
+    return None
+
+
+def _render_operating_assets_view() -> None:
+    st.subheader("Operating Assets (ERCOT MORA)")
+    st.caption("Source: ERCOT Resource Adequacy page (latest MORA workbook).")
+
+    with st.sidebar:
+        st.header("Operating Assets Source")
+        operating_index_url = st.text_input(
+            "ERCOT Operating Assets URL",
+            value=st.session_state.get("operating_assets_index_url", DEFAULT_OPERATING_ASSETS_INDEX_URL),
+            help="ERCOT Resource Adequacy page used to discover the latest MORA workbook.",
+        ).strip()
+        st.session_state["operating_assets_index_url"] = operating_index_url
+
+        if st.button("Refresh Operating Assets", use_container_width=True):
+            _cached_fetch_operating_assets.clear()
+            st.session_state["operating_assets_refreshed_at"] = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+
+    try:
+        assets_df, assets_meta = _cached_fetch_operating_assets(operating_index_url)
+    except Exception as exc:  # pylint: disable=broad-except
+        st.error(f"Could not load operating assets from ERCOT: {exc}")
+        return
+
+    assets_df = prepare_queue_dataframe(assets_df)
+    semantic = infer_semantic_columns(assets_df)
+
+    status_col = semantic.get("status")
+    fuel_col = semantic.get("fuel")
+    zone_col = semantic.get("reporting_zone")
+    asset_name_col = semantic.get("project_name")
+    capacity_col = semantic.get("capacity_mw")
+
+    if not capacity_col:
+        capacity_col = _first_matching_column(list(assets_df.columns), [r"available.*mw", r"max.*mw", r"\bmw\b"])
+    if not asset_name_col:
+        asset_name_col = _first_matching_column(list(assets_df.columns), [r"resource.*name", r"unit.*name", r"\bname\b"])
+
+    filtered_assets = assets_df.copy()
+    with st.sidebar:
+        st.header("Operating Assets Filters")
+        for label, column in [
+            ("Status", status_col),
+            ("Fuel", fuel_col),
+            ("Reporting Zone", zone_col),
+        ]:
+            if not column or column not in filtered_assets.columns:
+                continue
+            options = sorted({str(v) for v in filtered_assets[column].dropna().astype(str) if str(v).strip()})
+            if not options:
+                continue
+            selected = st.multiselect(f"Select {label} (Operating Assets)", options=options, default=options, key=f"op_{label.lower().replace(' ', '_')}")
+            if selected and set(selected) != set(options):
+                filtered_assets = filtered_assets[filtered_assets[column].astype(str).isin(selected)]
+
+    metric_cols = st.columns(4)
+    metric_cols[0].metric("Operating Rows", f"{len(filtered_assets):,}")
+    metric_cols[1].metric("Total Rows", f"{len(assets_df):,}")
+    if capacity_col and capacity_col in filtered_assets.columns:
+        total_capacity = float(pd.to_numeric(filtered_assets[capacity_col], errors="coerce").sum(skipna=True))
+        metric_cols[2].metric("Reported Capacity (MW)", f"{total_capacity:,.0f}")
+    else:
+        metric_cols[2].metric("Reported Capacity (MW)", "n/a")
+    metric_cols[3].metric("Source Workbook", assets_meta.get("report_label", "latest"))
+
+    if assets_meta:
+        st.caption(
+            f"Latest workbook URL: {assets_meta.get('source_url', 'n/a')} | "
+            f"Sheet: {assets_meta.get('tabs_processed', ['n/a'])[0]}"
+        )
+        refreshed_at = st.session_state.get("operating_assets_refreshed_at")
+        if refreshed_at:
+            st.caption(f"Last manual refresh check (UTC): {refreshed_at}")
+
+    chart_col_1, chart_col_2 = st.columns(2)
+    if fuel_col and fuel_col in filtered_assets.columns:
+        fuel_plot = (
+            filtered_assets.groupby(fuel_col, dropna=False)
+            .size()
+            .reset_index(name="assets")
+            .sort_values("assets", ascending=False)
+            .head(20)
+        )
+        fuel_fig = px.bar(fuel_plot, x=fuel_col, y="assets", title="Operating Assets by Fuel")
+        _style_chart(fuel_fig)
+        chart_col_1.plotly_chart(fuel_fig, use_container_width=True)
+    else:
+        chart_col_1.info("Fuel column not detected in operating assets sheet.")
+
+    if status_col and status_col in filtered_assets.columns:
+        status_plot = (
+            filtered_assets.groupby(status_col, dropna=False)
+            .size()
+            .reset_index(name="assets")
+            .sort_values("assets", ascending=False)
+            .head(20)
+        )
+        status_fig = px.bar(status_plot, x=status_col, y="assets", title="Operating Assets by Status")
+        _style_chart(status_fig)
+        chart_col_2.plotly_chart(status_fig, use_container_width=True)
+    else:
+        chart_col_2.info("Status column not detected in operating assets sheet.")
+
+    st.subheader("Operating Assets Table")
+    display_columns: list[str] = []
+    for column in [asset_name_col, status_col, fuel_col, zone_col, capacity_col]:
+        if column and column in filtered_assets.columns and column not in display_columns:
+            display_columns.append(column)
+    for column in filtered_assets.columns:
+        if column not in display_columns:
+            display_columns.append(column)
+
+    st.dataframe(filtered_assets[display_columns], use_container_width=True, height=420)
+    st.download_button(
+        label="Download Operating Assets (CSV)",
+        data=filtered_assets.to_csv(index=False).encode("utf-8"),
+        file_name="ercot_operating_assets.csv",
+        mime="text/csv",
+    )
+
+
 st.set_page_config(
     page_title="ERCOT Interconnection Queue",
     layout="wide",
@@ -409,6 +580,19 @@ st.markdown(
 """,
     unsafe_allow_html=True,
 )
+
+with st.sidebar:
+    st.header("App Tab")
+    app_view = st.radio(
+        "Select View",
+        options=["Interconnection Queue", "Operating Assets"],
+        index=0,
+        key="app_view",
+    )
+
+if app_view == "Operating Assets":
+    _render_operating_assets_view()
+    st.stop()
 
 
 with st.sidebar:

@@ -46,6 +46,7 @@ MONTH_TO_INT = {
     "dec": 12,
 }
 MAX_HEADER_SCAN_ROWS = 60
+DEFAULT_OPERATING_ASSETS_INDEX_URL = "https://www.ercot.com/gridinfo/resource"
 
 
 def fetch_latest_ercot_queue(custom_url: str | None = None) -> tuple[pd.DataFrame, dict[str, Any]]:
@@ -126,6 +127,105 @@ def fetch_latest_ercot_queue(custom_url: str | None = None) -> tuple[pd.DataFram
         "Set a direct ERCOT file URL in the app sidebar and try again. Details: "
         f"{error_body}"
     )
+
+
+def fetch_latest_operating_assets(index_url: str | None = None) -> tuple[pd.DataFrame, dict[str, Any]]:
+    """Fetch latest ERCOT operating assets sheet from the MORA workbook."""
+    resource_index_url = (index_url or DEFAULT_OPERATING_ASSETS_INDEX_URL).strip()
+    _assert_ercot_url(resource_index_url, "ERCOT operating assets index URL")
+
+    workbook_url, workbook_label = discover_latest_mora_workbook_url(resource_index_url)
+    content, _, effective_url = _fetch_url(workbook_url)
+    xls = pd.ExcelFile(io.BytesIO(content))
+
+    preferred_sheet = _select_operating_assets_sheet(xls.sheet_names)
+    sheet_df, header_row, header_score = _read_sheet_best_effort(xls, preferred_sheet)
+    cleaned = sheet_df.dropna(axis=1, how="all").dropna(axis=0, how="all")
+    if cleaned.empty:
+        raise RuntimeError(f"Latest MORA workbook sheet is empty: {preferred_sheet}")
+
+    cleaned["_source_sheet"] = preferred_sheet
+    cleaned["_source_header_row"] = header_row
+    cleaned["_source_header_score"] = header_score
+
+    meta = {
+        "source": "ercot_mora",
+        "source_url": effective_url,
+        "index_url": resource_index_url,
+        "report_label": workbook_label,
+        "tab_count": len(xls.sheet_names),
+        "tabs_processed": [preferred_sheet],
+    }
+    return cleaned, meta
+
+
+def discover_latest_mora_workbook_url(index_url: str) -> tuple[str, str]:
+    content, _, effective_url = _fetch_url(index_url)
+    html_text = content.decode("utf-8", errors="ignore")
+    soup = BeautifulSoup(html_text, "html.parser")
+
+    candidates: list[dict[str, Any]] = []
+    position = 0
+    for anchor in soup.find_all("a"):
+        href = (anchor.get("href") or "").strip()
+        if not href:
+            continue
+        label = " ".join(anchor.get_text(" ", strip=True).split())
+        abs_url = urljoin(effective_url, href)
+        lower_url = abs_url.lower()
+        lower_label = label.lower()
+
+        if not _is_ercot_url(abs_url):
+            continue
+        if not lower_url.endswith(".xlsx"):
+            continue
+        if "mora" not in lower_url and "mora" not in lower_label:
+            continue
+
+        found_date = _parse_date(abs_url) or _parse_date(label) or datetime.min
+        score = 0
+        if "mora" in lower_url:
+            score += 10
+        if "mora" in lower_label:
+            score += 8
+        if "resource" in lower_label:
+            score += 2
+
+        candidates.append(
+            {
+                "url": abs_url,
+                "label": label,
+                "date": found_date,
+                "score": score,
+                "position": position,
+            }
+        )
+        position += 1
+
+    if not candidates:
+        raise RuntimeError(f"No ERCOT MORA XLSX links found on page: {index_url}")
+
+    candidates.sort(key=lambda item: (item["date"], item["score"], -item["position"]), reverse=True)
+    best = candidates[0]
+    return str(best["url"]), str(best["label"] or "MORA workbook")
+
+
+def _select_operating_assets_sheet(sheet_names: list[str]) -> str:
+    if not sheet_names:
+        raise RuntimeError("MORA workbook has no sheets")
+
+    preferred_patterns = [
+        r"resource\s*details?",
+        r"resource\s*detail",
+        r"operating",
+    ]
+    lowered = [(name, name.lower()) for name in sheet_names]
+    for pattern in preferred_patterns:
+        for original, lower in lowered:
+            if re.search(pattern, lower):
+                return original
+
+    return sheet_names[0]
 
 
 def discover_report_index_from_product_page(product_url: str) -> tuple[str, dict[str, Any]]:
