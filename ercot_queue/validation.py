@@ -111,15 +111,31 @@ def compare_local_to_external(
     missing_in_local = external_cmp[external_cmp["queue_id_norm"].isin(missing_in_local_keys)].copy()
     missing_in_external = local_cmp[local_cmp["queue_id_norm"].isin(missing_in_external_keys)].copy()
 
+    # Calculate MW sums for summary
+    local_mw = float(local_cmp["capacity_mw"].sum())
+    external_mw = float(external_cmp["capacity_mw"].sum())
+    matched_mw = float(local_cmp[local_cmp["queue_id_norm"].isin(matched_keys)]["capacity_mw"].sum())
+    missing_in_local_mw = float(missing_in_local["capacity_mw"].sum())
+    missing_in_external_mw = float(missing_in_external["capacity_mw"].sum())
+    status_mismatch_mw = float(local_cmp[local_cmp["queue_id_norm"].isin([m["queue_id"] for m in status_mismatches])]["capacity_mw"].sum())
+    capacity_mismatch_mw = float(local_cmp[local_cmp["queue_id_norm"].isin([m["queue_id"] for m in capacity_mismatches])]["capacity_mw"].sum())
+
     return {
         "summary": {
             "local_queue_ids": int(len(local_keys)),
+            "local_mw": local_mw,
             "external_queue_ids": int(len(external_keys)),
+            "external_mw": external_mw,
             "matched_queue_ids": int(len(matched_keys)),
+            "matched_mw": matched_mw,
             "missing_in_local": int(len(missing_in_local_keys)),
+            "missing_in_local_mw": missing_in_local_mw,
             "missing_in_external": int(len(missing_in_external_keys)),
+            "missing_in_external_mw": missing_in_external_mw,
             "status_mismatches": int(len(status_mismatches)),
+            "status_mismatch_mw": status_mismatch_mw,
             "capacity_mismatches": int(len(capacity_mismatches)),
+            "capacity_mismatch_mw": capacity_mismatch_mw,
         },
         "missing_in_local": missing_in_local,
         "missing_in_external": missing_in_external,

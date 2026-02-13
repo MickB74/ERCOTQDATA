@@ -457,14 +457,25 @@ if validation_state:
         f"Source: {source_meta.get('source_url', validation_url)}"
     )
 
-    val_metrics = st.columns(7)
-    val_metrics[0].metric("Local IDs", summary.get("local_queue_ids", 0))
-    val_metrics[1].metric("External IDs", summary.get("external_queue_ids", 0))
-    val_metrics[2].metric("Matched IDs", summary.get("matched_queue_ids", 0))
-    val_metrics[3].metric("Missing in Local", summary.get("missing_in_local", 0))
-    val_metrics[4].metric("Missing in External", summary.get("missing_in_external", 0))
-    val_metrics[5].metric("Status Mismatches", summary.get("status_mismatches", 0))
-    val_metrics[6].metric("Capacity Mismatches", summary.get("capacity_mismatches", 0))
+    st.markdown("##### Project Counts")
+    val_metrics_ids = st.columns(7)
+    val_metrics_ids[0].metric("Local IDs", f"{summary.get('local_queue_ids', 0):,}")
+    val_metrics_ids[1].metric("External IDs", f"{summary.get('external_queue_ids', 0):,}")
+    val_metrics_ids[2].metric("Matched IDs", f"{summary.get('matched_queue_ids', 0):,}")
+    val_metrics_ids[3].metric("Missing Local", f"{summary.get('missing_in_local', 0):,}")
+    val_metrics_ids[4].metric("Missing External", f"{summary.get('missing_in_external', 0):,}")
+    val_metrics_ids[5].metric("Status Mismatches", f"{summary.get('status_mismatches', 0):,}")
+    val_metrics_ids[6].metric("Capacity Mismatches", f"{summary.get('capacity_mismatches', 0):,}")
+
+    st.markdown("##### Total Capacity (MW)")
+    val_metrics_mw = st.columns(7)
+    val_metrics_mw[0].metric("Local MW", f"{summary.get('local_mw', 0):,.0f}")
+    val_metrics_mw[1].metric("External MW", f"{summary.get('external_mw', 0):,.0f}")
+    val_metrics_mw[2].metric("Matched MW", f"{summary.get('matched_mw', 0):,.0f}")
+    val_metrics_mw[3].metric("Missing Local MW", f"{summary.get('missing_in_local_mw', 0):,.0f}")
+    val_metrics_mw[4].metric("Missing External MW", f"{summary.get('missing_in_external_mw', 0):,.0f}")
+    val_metrics_mw[5].metric("Status Mismatch MW", f"{summary.get('status_mismatch_mw', 0):,.0f}")
+    val_metrics_mw[6].metric("Capacity Mismatch MW", f"{summary.get('capacity_mismatch_mw', 0):,.0f}")
 
     missing_in_local_df = validation_state["result"]["missing_in_local"]
     missing_in_external_df = validation_state["result"]["missing_in_external"]
