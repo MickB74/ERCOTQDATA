@@ -53,6 +53,11 @@ def infer_semantic_columns(df: pd.DataFrame) -> dict[str, str | None]:
             preferred_exact=["fuel", "technology", "resource_type"],
             patterns=[r"fuel", r"technology", r"resource[_ ]type"],
         ),
+        "technology": _select_semantic_column(
+            df,
+            preferred_exact=["technology", "generation_type", "resource_type"],
+            patterns=[r"technology", r"generation[_ ]type", r"resource[_ ]type", r"tech"],
+        ),
         "county": _select_semantic_column(
             df,
             preferred_exact=["county", "location_county"],

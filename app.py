@@ -25,6 +25,37 @@ from ercot_queue.validation import (
     fetch_interconnection_fyi_ercot,
 )
 
+FUEL_CODE_MAP = {
+    "BIO": "Biomass",
+    "COA": "Coal",
+    "GAS": "Gas",
+    "GEO": "Geothermal",
+    "HYD": "Hydrogen",
+    "NUC": "Nuclear",
+    "OIL": "Fuel oil",
+    "OTH": "Other",
+    "PET": "Petcoke",
+    "SOL": "Solar",
+    "WAT": "Water",
+    "WIN": "Wind",
+}
+
+TECHNOLOGY_CODE_MAP = {
+    "BA": "Battery Energy Storage",
+    "CC": "Combined-cycle",
+    "CE": "Compressed air energy storage",
+    "CP": "Concentrated solar power",
+    "EN": "Energy storage",
+    "FC": "Fuel cell",
+    "GT": "Combustion turbine (simple-cycle)",
+    "HY": "Hydroelectric turbine",
+    "IC": "Internal combustion engine (reciprocating)",
+    "OT": "Other",
+    "PV": "Photovoltaic solar",
+    "ST": "Steam turbine (non-CC)",
+    "WT": "Wind turbine",
+}
+
 
 def _format_timestamp(raw_ts: str) -> str:
     try:
@@ -37,6 +68,31 @@ def _format_timestamp(raw_ts: str) -> str:
 @st.cache_data(ttl=60 * 30, show_spinner=False)
 def _cached_fetch_external_validation(url: str) -> tuple[pd.DataFrame, dict]:
     return fetch_interconnection_fyi_ercot(url)
+
+
+def _map_code_to_name(value: object, crosswalk: dict[str, str]) -> str | None:
+    if pd.isna(value):
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    return crosswalk.get(text.upper(), text)
+
+
+def _apply_crosswalk_columns(df: pd.DataFrame, semantic: dict[str, str | None]) -> pd.DataFrame:
+    result = df.copy()
+
+    fuel_col = semantic.get("fuel")
+    if fuel_col and fuel_col in result.columns:
+        result["fuel_name"] = result[fuel_col].map(lambda value: _map_code_to_name(value, FUEL_CODE_MAP))
+
+    technology_col = semantic.get("technology")
+    if technology_col and technology_col in result.columns:
+        result["technology_name"] = result[technology_col].map(
+            lambda value: _map_code_to_name(value, TECHNOLOGY_CODE_MAP)
+        )
+
+    return result
 
 
 st.set_page_config(
@@ -103,26 +159,37 @@ if current_df is None or current_df.empty:
     st.stop()
 
 semantic = infer_semantic_columns(current_df)
+current_df = _apply_crosswalk_columns(current_df, semantic)
 filtered_df = current_df.copy()
 active_filters: list[str] = []
 
 capacity_col = semantic.get("capacity_mw")
+status_col = semantic.get("status")
+fuel_col = semantic.get("fuel")
+technology_col = semantic.get("technology")
+zone_col = semantic.get("reporting_zone")
+developer_col = semantic.get("developer")
+county_col = semantic.get("county")
+fuel_display_col = "fuel_name" if "fuel_name" in current_df.columns else fuel_col
+technology_display_col = "technology_name" if "technology_name" in current_df.columns else technology_col
 
 with st.sidebar:
     st.header("Filters")
 
-    for label, semantic_key in [
-        ("Status", "status"),
-        ("Fuel / Technology", "fuel"),
-        ("Reporting Zone", "reporting_zone"),
-        ("Developer", "developer"),
-        ("County", "county"),
-    ]:
-        column = semantic.get(semantic_key)
+    filter_definitions = [
+        ("Status", status_col, "status"),
+        ("Fuel", fuel_display_col, "fuel"),
+        ("Technology", technology_display_col, "technology"),
+        ("Reporting Zone", zone_col, "reporting_zone"),
+        ("Developer", developer_col, "developer"),
+        ("County", county_col, "county"),
+    ]
+
+    for label, column, filter_key in filter_definitions:
         if not column or column not in filtered_df.columns:
             continue
 
-        if semantic_key == "developer" and capacity_col and capacity_col in current_df.columns:
+        if filter_key == "developer" and capacity_col and capacity_col in current_df.columns:
             # Sort developers by total MW (descending)
             options = (
                 current_df.groupby(column)[capacity_col]
@@ -145,9 +212,9 @@ with st.sidebar:
             continue
 
         # Add "Select All" logic
-        select_all = st.checkbox(f"All {label}", value=True, key=f"all_{semantic_key}")
+        select_all = st.checkbox(f"All {label}", value=True, key=f"all_{filter_key}")
         if not select_all:
-            selected = st.multiselect(f"Select {label}", options=options, default=options)
+            selected = st.multiselect(f"Select {label}", options=options, default=options, key=f"select_{filter_key}")
             if selected and set(selected) != set(options):
                 filtered_df = filtered_df[filtered_df[column].astype(str).isin(selected)]
                 active_filters.append(label)
@@ -231,7 +298,6 @@ if current_meta:
 
 chart_col_1, chart_col_2 = st.columns(2)
 
-status_col = semantic.get("status")
 if status_col and status_col in filtered_df.columns:
     status_data = filtered_df.copy()
     if capacity_col and capacity_col in status_data.columns:
@@ -259,19 +325,37 @@ if status_col and status_col in filtered_df.columns:
 else:
     chart_col_1.info("No status column detected for status chart.")
 
-fuel_col = semantic.get("fuel")
-if fuel_col and fuel_col in filtered_df.columns:
+if fuel_display_col and fuel_display_col in filtered_df.columns:
     fuel_plot = (
-        filtered_df.groupby(fuel_col, dropna=False)
+        filtered_df.groupby(fuel_display_col, dropna=False)
         .size()
         .reset_index(name="projects")
         .sort_values("projects", ascending=False)
         .head(20)
     )
-    fuel_fig = px.bar(fuel_plot, x=fuel_col, y="projects", title="Projects by Fuel / Technology")
+    fuel_fig = px.bar(fuel_plot, x=fuel_display_col, y="projects", title="Projects by Fuel")
     chart_col_2.plotly_chart(fuel_fig, use_container_width=True)
 else:
-    chart_col_2.info("No fuel/technology column detected for fuel chart.")
+    chart_col_2.info("No fuel column detected for fuel chart.")
+
+st.subheader("Projects by Technology")
+if technology_display_col and technology_display_col in filtered_df.columns:
+    technology_plot = (
+        filtered_df.groupby(technology_display_col, dropna=False)
+        .size()
+        .reset_index(name="projects")
+        .sort_values("projects", ascending=False)
+        .head(20)
+    )
+    technology_fig = px.bar(
+        technology_plot,
+        x=technology_display_col,
+        y="projects",
+        title="Projects by Technology",
+    )
+    st.plotly_chart(technology_fig, use_container_width=True)
+else:
+    st.info("No technology column detected for technology chart.")
 
 cod_col = semantic.get("cod_date")
 if cod_col and cod_col in filtered_df.columns:
@@ -361,14 +445,13 @@ else:
 
 
 st.subheader("Regional Analysis")
-zone_col = semantic.get("reporting_zone")
-fuel_col = semantic.get("fuel")
+fuel_col_for_region = fuel_display_col
 
 if zone_col and zone_col in filtered_df.columns:
     if capacity_col and capacity_col in filtered_df.columns:
         # Prepare data for stacked bars
         zone_fuel_df = (
-            filtered_df.groupby([zone_col, fuel_col or "Unknown"])[capacity_col]
+            filtered_df.groupby([zone_col, fuel_col_for_region or "Unknown"])[capacity_col]
             .sum()
             .reset_index()
             .sort_values(capacity_col, ascending=False)
@@ -378,9 +461,9 @@ if zone_col and zone_col in filtered_df.columns:
             zone_fuel_df,
             x=zone_col,
             y=capacity_col,
-            color=fuel_col or "Unknown",
-            title="Capacity (MW) by Reporting Zone and Technology",
-            labels={capacity_col: "Total MW", zone_col: "Reporting Zone", fuel_col or "Unknown": "Technology"},
+            color=fuel_col_for_region or "Unknown",
+            title="Capacity (MW) by Reporting Zone and Fuel",
+            labels={capacity_col: "Total MW", zone_col: "Reporting Zone", fuel_col_for_region or "Unknown": "Fuel"},
             barmode="stack",
         )
         st.plotly_chart(zone_fig, use_container_width=True)
