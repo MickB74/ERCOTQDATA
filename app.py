@@ -161,8 +161,8 @@ def _extract_plotly_points(event: object) -> list[Any]:
         selection = event.get("selection")
         if isinstance(selection, dict):
             points = selection.get("points")
-            if isinstance(points, list):
-                return points
+            if isinstance(points, (list, tuple)):
+                return list(points)
         return []
 
     selection = getattr(event, "selection", None)
@@ -170,8 +170,13 @@ def _extract_plotly_points(event: object) -> list[Any]:
         return []
 
     points = getattr(selection, "points", None)
-    if isinstance(points, list):
-        return points
+    if isinstance(points, (list, tuple)):
+        return list(points)
+    if points is not None:
+        try:
+            return list(points)
+        except TypeError:
+            return []
     return []
 
 
@@ -249,7 +254,6 @@ def _style_chart(fig: Any, *, x_tick_angle: int = -30, height: int = 380) -> Non
         height=height,
         margin=dict(l=8, r=8, t=56, b=8),
         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1.0),
-        dragmode="select",
     )
     fig.update_xaxes(tickangle=x_tick_angle, automargin=True)
     fig.update_yaxes(automargin=True)
@@ -810,6 +814,7 @@ if fuel_display_col and fuel_display_col in fuel_chart_df.columns:
         use_container_width=True,
         key="fuel_chart",
         on_select="rerun",
+        selection_mode=("points", "box", "lasso"),
     )
     fuel_selected = _selected_values_from_event(fuel_event, "x")
     if _update_chart_filter("fuel", fuel_selected):
@@ -851,6 +856,7 @@ if technology_display_col and technology_display_col in technology_chart_df.colu
         use_container_width=True,
         key="technology_count_chart",
         on_select="rerun",
+        selection_mode=("points", "box", "lasso"),
     )
     technology_count_selected = _selected_values_from_event(technology_count_event, "x")
     if _update_chart_filter("technology", technology_count_selected):
@@ -897,6 +903,7 @@ if technology_display_col and technology_display_col in technology_chart_df.colu
             use_container_width=True,
             key="technology_mw_chart",
             on_select="rerun",
+            selection_mode=("points", "box", "lasso"),
         )
         technology_mw_selected = _selected_values_from_event(technology_mw_event, "x")
         if _update_chart_filter("technology", technology_mw_selected):
@@ -970,6 +977,7 @@ if cod_col and cod_col in cod_chart_df.columns:
                 use_container_width=True,
                 key="expected_cod_year_mw_chart",
                 on_select="rerun",
+                selection_mode=("points", "box", "lasso"),
             )
             cod_mw_selected = _selected_values_from_event(cod_mw_event, "x")
             if _update_chart_filter("cod_year", cod_mw_selected):
@@ -999,6 +1007,7 @@ if cod_col and cod_col in cod_chart_df.columns:
                 use_container_width=True,
                 key="expected_cod_year_projects_chart",
                 on_select="rerun",
+                selection_mode=("points", "box", "lasso"),
             )
             cod_count_selected = _selected_values_from_event(cod_count_event, "x")
             if _update_chart_filter("cod_year", cod_count_selected):
@@ -1039,6 +1048,7 @@ if cod_col and cod_col in cod_chart_df.columns:
                 use_container_width=True,
                 key="expected_cod_year_projects_chart",
                 on_select="rerun",
+                selection_mode=("points", "box", "lasso"),
             )
             cod_count_selected = _selected_values_from_event(cod_count_event, "x")
             if _update_chart_filter("cod_year", cod_count_selected):
@@ -1059,6 +1069,7 @@ if cod_col and cod_col in cod_chart_df.columns:
             use_container_width=True,
             key="timeline_chart",
             on_select="rerun",
+            selection_mode=("points", "box", "lasso"),
         )
         timeline_selected = _selected_values_from_event(timeline_event, "x")
         if _update_chart_filter("cod_year", timeline_selected):
@@ -1119,6 +1130,7 @@ if dev_col and dev_col in developer_chart_df.columns:
             use_container_width=True,
             key="developer_mw_chart",
             on_select="rerun",
+            selection_mode=("points", "box", "lasso"),
         )
         dev_mw_selected = _selected_values_from_event(dev_mw_event, "y")
         if _update_chart_filter("developer", dev_mw_selected):
@@ -1162,6 +1174,7 @@ if dev_col and dev_col in developer_chart_df.columns:
         use_container_width=True,
         key="developer_count_chart",
         on_select="rerun",
+        selection_mode=("points", "box", "lasso"),
     )
     dev_count_selected = _selected_values_from_event(dev_count_event, "y")
     if _update_chart_filter("developer", dev_count_selected):
@@ -1210,6 +1223,7 @@ if zone_col and zone_col in zone_chart_df.columns:
             use_container_width=True,
             key="zone_chart",
             on_select="rerun",
+            selection_mode=("points", "box", "lasso"),
         )
         zone_selected = _selected_customdata_values(zone_event, 0)
         if _update_chart_filter("zone", zone_selected):
