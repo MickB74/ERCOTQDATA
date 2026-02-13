@@ -208,18 +208,24 @@ def _update_chart_filter(filter_key: str, values: list[str]) -> bool:
         return False
 
     chart_filters = st.session_state.setdefault("chart_filters", {})
-    existing = chart_filters.get(filter_key, [])
-    selection_mode = st.session_state.get("chart_selection_mode", "Add to selection")
+    existing_values = chart_filters.get(filter_key, [])
+    updated_values = set(existing_values)
 
-    if selection_mode == "Add to selection":
-        merged_values = sorted(set(existing).union(values))
-    else:
-        merged_values = values
+    for value in values:
+        normalized = _normalize_filter_value(value)
+        if normalized in updated_values:
+            updated_values.remove(normalized)
+        else:
+            updated_values.add(normalized)
 
-    if existing == merged_values:
+    merged_values = sorted(updated_values)
+    if existing_values == merged_values:
         return False
 
-    chart_filters[filter_key] = merged_values
+    if merged_values:
+        chart_filters[filter_key] = merged_values
+    else:
+        chart_filters.pop(filter_key, None)
     return True
 
 
@@ -646,13 +652,6 @@ with st.sidebar:
 
 with st.sidebar:
     st.markdown("---")
-    st.radio(
-        "Chart Selection Mode",
-        options=["Add to selection", "Replace selection"],
-        index=0,
-        key="chart_selection_mode",
-        help="Add: each click appends more items. Replace: each click replaces current chart selection.",
-    )
     if st.button("Clear Chart Selections", use_container_width=True):
         st.session_state["chart_filters"] = {}
         st.rerun()
@@ -747,7 +746,7 @@ if current_meta:
             st.write("Tabs Processed: " + ", ".join(tabs_processed))
 
 st.subheader("Fuel and Technology Mix")
-st.caption("Chart clicks can select multiple items when `Chart Selection Mode` is set to `Add to selection`.")
+st.caption("Click chart items to toggle selection. Click a selected item again to unselect it.")
 chart_col_1, chart_col_2 = st.columns(2)
 fuel_chart_df = _apply_chart_filters(
     charts_base_df,
