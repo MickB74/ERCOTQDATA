@@ -17,6 +17,11 @@ from ercot_queue.store import (
     load_snapshot_history,
     save_snapshot,
 )
+from ercot_queue.validation import (
+    INTERCONNECTION_FYI_ERCOT_URL,
+    compare_local_to_external,
+    fetch_interconnection_fyi_ercot,
+)
 
 
 def _format_timestamp(raw_ts: str) -> str:
@@ -25,6 +30,11 @@ def _format_timestamp(raw_ts: str) -> str:
         return parsed.strftime("%Y-%m-%d %H:%M UTC")
     except ValueError:
         return raw_ts
+
+
+@st.cache_data(ttl=60 * 30, show_spinner=False)
+def _cached_fetch_external_validation(url: str) -> tuple[pd.DataFrame, dict]:
+    return fetch_interconnection_fyi_ercot(url)
 
 
 st.set_page_config(
@@ -394,3 +404,93 @@ if history:
     st.dataframe(history_df[show_cols], use_container_width=True, height=280)
 else:
     st.write("No snapshot history available yet.")
+
+
+st.subheader("External Validation (Interconnection.fyi)")
+st.caption(
+    "Cross-check this snapshot against an independent source and highlight queue ID, status, and capacity mismatches."
+)
+
+validation_col_1, validation_col_2 = st.columns([3, 1])
+with validation_col_1:
+    validation_url = st.text_input(
+        "Validation Source URL",
+        value=INTERCONNECTION_FYI_ERCOT_URL,
+        help="Independent source used for queue cross-checking.",
+    ).strip()
+with validation_col_2:
+    run_validation = st.button("Run External Validation", use_container_width=True)
+
+if run_validation:
+    try:
+        with st.spinner("Fetching external source and comparing queue IDs..."):
+            external_df, external_meta = _cached_fetch_external_validation(validation_url)
+            validation_result = compare_local_to_external(
+                current_df,
+                external_df,
+                local_queue_col=semantic.get("queue_id"),
+                local_status_col=semantic.get("status"),
+                local_capacity_col=semantic.get("capacity_mw"),
+            )
+        st.session_state["external_validation"] = {
+            "ran_at_utc": datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
+            "source_meta": external_meta,
+            "result": validation_result,
+        }
+        st.success(
+            "Validation complete. "
+            f"Matched {validation_result['summary']['matched_queue_ids']} queue IDs; "
+            f"missing local: {validation_result['summary']['missing_in_local']}, "
+            f"missing external: {validation_result['summary']['missing_in_external']}."
+        )
+    except Exception as exc:  # pylint: disable=broad-except
+        st.error(f"External validation failed: {exc}")
+
+validation_state = st.session_state.get("external_validation")
+if validation_state:
+    summary = validation_state["result"]["summary"]
+    source_meta = validation_state["source_meta"]
+
+    st.caption(
+        f"Last validation run: {validation_state['ran_at_utc']} UTC | "
+        f"Parser: {source_meta.get('parser', 'unknown')} | "
+        f"Source: {source_meta.get('source_url', validation_url)}"
+    )
+
+    val_metrics = st.columns(7)
+    val_metrics[0].metric("Local IDs", summary.get("local_queue_ids", 0))
+    val_metrics[1].metric("External IDs", summary.get("external_queue_ids", 0))
+    val_metrics[2].metric("Matched IDs", summary.get("matched_queue_ids", 0))
+    val_metrics[3].metric("Missing in Local", summary.get("missing_in_local", 0))
+    val_metrics[4].metric("Missing in External", summary.get("missing_in_external", 0))
+    val_metrics[5].metric("Status Mismatches", summary.get("status_mismatches", 0))
+    val_metrics[6].metric("Capacity Mismatches", summary.get("capacity_mismatches", 0))
+
+    missing_in_local_df = validation_state["result"]["missing_in_local"]
+    missing_in_external_df = validation_state["result"]["missing_in_external"]
+    status_mismatch_df = validation_state["result"]["status_mismatches"]
+    capacity_mismatch_df = validation_state["result"]["capacity_mismatches"]
+
+    with st.expander("Queue IDs Missing In Local Snapshot", expanded=False):
+        if isinstance(missing_in_local_df, pd.DataFrame) and not missing_in_local_df.empty:
+            st.dataframe(missing_in_local_df, use_container_width=True)
+        else:
+            st.write("No missing queue IDs in local snapshot.")
+
+    with st.expander("Queue IDs Missing In External Source", expanded=False):
+        if isinstance(missing_in_external_df, pd.DataFrame) and not missing_in_external_df.empty:
+            st.dataframe(missing_in_external_df, use_container_width=True)
+        else:
+            st.write("No missing queue IDs in external source.")
+
+    with st.expander("Status Mismatches", expanded=False):
+        if isinstance(status_mismatch_df, pd.DataFrame) and not status_mismatch_df.empty:
+            st.dataframe(status_mismatch_df, use_container_width=True)
+        else:
+            st.write("No status mismatches detected.")
+
+    with st.expander("Capacity Mismatches (MW)", expanded=False):
+        if isinstance(capacity_mismatch_df, pd.DataFrame) and not capacity_mismatch_df.empty:
+            st.dataframe(capacity_mismatch_df, use_container_width=True)
+        else:
+            st.write("No capacity mismatches above tolerance.")

@@ -17,6 +17,7 @@ Interactive Streamlit app to pull the ERCOT interconnection queue, explore it wi
   - cumulative COD timeline
 - Download filtered records as CSV
 - View snapshot history with per-refresh diff summary
+- Validate against an independent external source (Interconnection.fyi) with mismatch reports
 
 ## Project Layout
 
