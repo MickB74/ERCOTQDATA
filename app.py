@@ -13,6 +13,7 @@ try:
     from ercot_queue.fetcher import (
         DEFAULT_OPERATING_ASSETS_INDEX_URL,
         discover_latest_report_url,
+        discover_latest_mora_workbook_url,
         discover_report_index_from_product_page,
         fetch_latest_ercot_queue,
         fetch_latest_operating_assets,
@@ -359,6 +360,61 @@ def _apply_selection_highlight(
     return highlighted, "selection_state"
 
 
+def _update_operating_chart_filter(
+    filter_key: str,
+    chart_id: str,
+    values: list[str],
+    *,
+    event: object,
+) -> bool:
+    if not _event_has_selection(event):
+        return False
+
+    normalized_values = sorted({_normalize_filter_value(value) for value in values if str(value).strip()})
+    chart_selection_state = st.session_state.setdefault("operating_chart_selection_state", {})
+    previous_selection = chart_selection_state.get(chart_id)
+    if previous_selection == normalized_values:
+        return False
+    chart_selection_state[chart_id] = normalized_values
+
+    chart_filters = st.session_state.setdefault("operating_chart_filters", {})
+    existing_values = chart_filters.get(filter_key, [])
+    merged_values = _toggle_values(existing_values, normalized_values)
+    if existing_values == merged_values:
+        return False
+
+    if merged_values:
+        chart_filters[filter_key] = merged_values
+    else:
+        chart_filters.pop(filter_key, None)
+    return True
+
+
+def _apply_operating_chart_filters(
+    df: pd.DataFrame,
+    chart_filters: dict[str, list[str]],
+    *,
+    fuel_col: str | None,
+    status_col: str | None,
+    exclude_key: str | None = None,
+) -> pd.DataFrame:
+    filtered = df
+    if exclude_key != "fuel" and chart_filters.get("fuel") and fuel_col and fuel_col in filtered.columns:
+        selected_fuel = set(chart_filters["fuel"])
+        filtered = filtered[filtered[fuel_col].map(_normalize_filter_value).isin(selected_fuel)]
+
+    if exclude_key != "status" and chart_filters.get("status") and status_col and status_col in filtered.columns:
+        selected_status = set(chart_filters["status"])
+        filtered = filtered[filtered[status_col].map(_normalize_filter_value).isin(selected_status)]
+
+    return filtered
+
+
+def _clear_operating_chart_filters() -> None:
+    st.session_state["operating_chart_filters"] = {}
+    st.session_state["operating_chart_selection_state"] = {}
+
+
 def _queue_sidebar_sync_from_chart(chart_key: str, selected_values: list[str]) -> None:
     chart_to_sidebar_key = {
         "fuel": "fuel",
@@ -507,14 +563,32 @@ def _render_operating_assets_view() -> None:
         st.session_state["operating_assets_index_url"] = operating_index_url
 
         if st.button("Refresh Operating Assets", use_container_width=True):
-            _cached_fetch_operating_assets.clear()
             st.session_state["operating_assets_refreshed_at"] = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+            previous_source_url = str(st.session_state.get("operating_assets_source_url", ""))
+            try:
+                latest_workbook_url, _ = discover_latest_mora_workbook_url(operating_index_url)
+                if previous_source_url and (
+                    _source_identity(latest_workbook_url) == _source_identity(previous_source_url)
+                ):
+                    st.session_state["operating_refresh_notice"] = (
+                        "No new operating assets workbook was found. Using current data."
+                    )
+                else:
+                    _cached_fetch_operating_assets.clear()
+                    st.session_state["operating_refresh_notice"] = "New operating assets workbook found. Refresh complete."
+            except Exception as exc:  # pylint: disable=broad-except
+                st.session_state["operating_refresh_notice"] = (
+                    "Could not check for a newer operating assets workbook. "
+                    f"Using current data. Details: {exc}"
+                )
 
     try:
         assets_df, assets_meta = _cached_fetch_operating_assets(operating_index_url)
     except Exception as exc:  # pylint: disable=broad-except
         st.error(f"Could not load operating assets from ERCOT: {exc}")
         return
+
+    st.session_state["operating_assets_source_url"] = str(assets_meta.get("source_url", ""))
 
     assets_df = _prepare_operating_assets_dataframe(assets_df)
     semantic = infer_semantic_columns(assets_df)
@@ -546,6 +620,25 @@ def _render_operating_assets_view() -> None:
             selected = st.multiselect(f"Select {label} (Operating Assets)", options=options, default=options, key=f"op_{label.lower().replace(' ', '_')}")
             if selected and set(selected) != set(options):
                 filtered_assets = filtered_assets[filtered_assets[column].astype(str).isin(selected)]
+
+    operating_chart_filters: dict[str, list[str]] = st.session_state.setdefault("operating_chart_filters", {})
+    if not fuel_col or fuel_col not in filtered_assets.columns:
+        operating_chart_filters.pop("fuel", None)
+    if not status_col or status_col not in filtered_assets.columns:
+        operating_chart_filters.pop("status", None)
+    operating_charts_base_df = filtered_assets.copy()
+    filtered_assets = _apply_operating_chart_filters(
+        filtered_assets,
+        operating_chart_filters,
+        fuel_col=fuel_col,
+        status_col=status_col,
+    )
+
+    with st.sidebar:
+        st.markdown("---")
+        if st.button("Clear Operating Chart Selections", use_container_width=True):
+            _clear_operating_chart_filters()
+            st.rerun()
 
     metric_cols = st.columns(3)
     official_operational = assets_meta.get("operational_installed_capacity_mw")
@@ -598,8 +691,22 @@ def _render_operating_assets_view() -> None:
         metric_cols[0].metric("Operational Installed Capacity (MW)", "n/a")
     metric_cols[1].metric("Operating Rows", f"{len(filtered_assets):,}")
     metric_cols[2].metric("Source Workbook", assets_meta.get("report_label", "latest"))
+    if operating_chart_filters:
+        labels: list[str] = []
+        if operating_chart_filters.get("fuel"):
+            labels.append("Fuel")
+        if operating_chart_filters.get("status"):
+            labels.append("Status")
+        if labels:
+            st.caption("Active chart filters: " + ", ".join(labels))
 
     if assets_meta:
+        operating_notice = st.session_state.get("operating_refresh_notice")
+        if operating_notice:
+            if operating_notice.startswith("New operating assets workbook found"):
+                st.success(operating_notice)
+            else:
+                st.info(operating_notice)
         st.caption(
             f"Latest workbook URL: {assets_meta.get('source_url', 'n/a')} | "
             f"Sheet: {assets_meta.get('tabs_processed', ['n/a'])[0]}"
@@ -620,31 +727,103 @@ def _render_operating_assets_view() -> None:
                 )
 
     chart_col_1, chart_col_2 = st.columns(2)
-    if fuel_col and fuel_col in filtered_assets.columns:
+    st.caption("Click chart items to toggle selection, or drag a box to select multiple bars.")
+    fuel_chart_df = _apply_operating_chart_filters(
+        operating_charts_base_df,
+        operating_chart_filters,
+        fuel_col=fuel_col,
+        status_col=status_col,
+        exclude_key="fuel",
+    )
+    status_chart_df = _apply_operating_chart_filters(
+        operating_charts_base_df,
+        operating_chart_filters,
+        fuel_col=fuel_col,
+        status_col=status_col,
+        exclude_key="status",
+    )
+
+    if fuel_col and fuel_col in fuel_chart_df.columns:
         fuel_plot = (
-            filtered_assets.groupby(fuel_col, dropna=False)
+            fuel_chart_df.groupby(fuel_col, dropna=False)
             .size()
             .reset_index(name="assets")
             .sort_values("assets", ascending=False)
             .head(20)
         )
-        fuel_fig = px.bar(fuel_plot, x=fuel_col, y="assets", title="Operating Assets by Fuel")
+        fuel_plot, fuel_color_col = _apply_selection_highlight(
+            fuel_plot,
+            fuel_col,
+            operating_chart_filters.get("fuel", []),
+        )
+        fuel_chart_kwargs: dict[str, Any] = {}
+        if fuel_color_col:
+            fuel_chart_kwargs = {
+                "color": fuel_color_col,
+                "color_discrete_map": {"Selected": "#4C78A8", "Other": "#9AA4B2"},
+                "category_orders": {fuel_color_col: ["Selected", "Other"]},
+            }
+        fuel_fig = px.bar(
+            fuel_plot,
+            x=fuel_col,
+            y="assets",
+            title="Operating Assets by Fuel",
+            **fuel_chart_kwargs,
+        )
+        fuel_fig.update_layout(clickmode="event+select")
         _style_chart(fuel_fig)
-        chart_col_1.plotly_chart(fuel_fig, use_container_width=True)
+        fuel_event = chart_col_1.plotly_chart(
+            fuel_fig,
+            use_container_width=True,
+            key="op_fuel_chart",
+            on_select="rerun",
+            selection_mode=("points", "box", "lasso"),
+        )
+        fuel_selected = _selected_values_from_event(fuel_event, "x")
+        if _update_operating_chart_filter("fuel", "op_fuel_chart", fuel_selected, event=fuel_event):
+            st.rerun()
     else:
         chart_col_1.info("Fuel column not detected in operating assets sheet.")
 
-    if status_col and status_col in filtered_assets.columns:
+    if status_col and status_col in status_chart_df.columns:
         status_plot = (
-            filtered_assets.groupby(status_col, dropna=False)
+            status_chart_df.groupby(status_col, dropna=False)
             .size()
             .reset_index(name="assets")
             .sort_values("assets", ascending=False)
             .head(20)
         )
-        status_fig = px.bar(status_plot, x=status_col, y="assets", title="Operating Assets by Status")
+        status_plot, status_color_col = _apply_selection_highlight(
+            status_plot,
+            status_col,
+            operating_chart_filters.get("status", []),
+        )
+        status_chart_kwargs: dict[str, Any] = {}
+        if status_color_col:
+            status_chart_kwargs = {
+                "color": status_color_col,
+                "color_discrete_map": {"Selected": "#4C78A8", "Other": "#9AA4B2"},
+                "category_orders": {status_color_col: ["Selected", "Other"]},
+            }
+        status_fig = px.bar(
+            status_plot,
+            x=status_col,
+            y="assets",
+            title="Operating Assets by Status",
+            **status_chart_kwargs,
+        )
+        status_fig.update_layout(clickmode="event+select")
         _style_chart(status_fig)
-        chart_col_2.plotly_chart(status_fig, use_container_width=True)
+        status_event = chart_col_2.plotly_chart(
+            status_fig,
+            use_container_width=True,
+            key="op_status_chart",
+            on_select="rerun",
+            selection_mode=("points", "box", "lasso"),
+        )
+        status_selected = _selected_values_from_event(status_event, "x")
+        if _update_operating_chart_filter("status", "op_status_chart", status_selected, event=status_event):
+            st.rerun()
     else:
         chart_col_2.info("Status column not detected in operating assets sheet.")
 
