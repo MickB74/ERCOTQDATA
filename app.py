@@ -158,10 +158,48 @@ if current_df is None or current_df.empty:
     st.info("No snapshot yet. Click `Refresh Data` in the sidebar to pull the first dataset.")
     st.stop()
 
+scope_options = [
+    "Combined (Large + Small)",
+    "Large Gen Only",
+    "Small Gen Only",
+]
+source_sheet_col = "source_sheet" if "source_sheet" in current_df.columns else None
+scope_notice: str | None = None
+
+with st.sidebar:
+    st.header("Dataset Scope")
+    selected_scope = st.radio(
+        "Project Set",
+        options=scope_options,
+        index=0,
+        key="dataset_scope",
+    )
+
+if source_sheet_col:
+    source_text = current_df[source_sheet_col].astype("string").str.lower()
+    large_mask = source_text.str.contains("project details - large gen", na=False)
+    small_mask = source_text.str.contains("project details - small gen", na=False)
+
+    if selected_scope == "Large Gen Only":
+        if large_mask.any():
+            current_df = current_df[large_mask].copy()
+        else:
+            scope_notice = "Large Gen tab not found in this snapshot; showing combined data."
+    elif selected_scope == "Small Gen Only":
+        if small_mask.any():
+            current_df = current_df[small_mask].copy()
+        else:
+            scope_notice = "Small Gen tab not found in this snapshot; showing combined data."
+else:
+    scope_notice = "Source sheet labels are unavailable in this snapshot; showing combined data."
+
 semantic = infer_semantic_columns(current_df)
 current_df = _apply_crosswalk_columns(current_df, semantic)
 filtered_df = current_df.copy()
 active_filters: list[str] = []
+
+if selected_scope != "Combined (Large + Small)":
+    active_filters.append(selected_scope)
 
 capacity_col = semantic.get("capacity_mw")
 status_col = semantic.get("status")
@@ -281,6 +319,9 @@ if active_filters:
     st.caption("Active filters: " + ", ".join(active_filters))
 else:
     st.caption("Active filters: none")
+
+if scope_notice:
+    st.caption(scope_notice)
 
 if current_meta:
     st.caption(
