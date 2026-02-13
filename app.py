@@ -1677,7 +1677,7 @@ if chart_filters:
 
 
 st.subheader("Current Snapshot")
-metric_cols = st.columns(4)
+metric_cols = st.columns(5)
 metric_cols[0].metric("Filtered Projects", f"{len(filtered_df):,}")
 metric_cols[1].metric("Total Projects", f"{len(current_df):,}")
 
@@ -1685,15 +1685,18 @@ capacity_col = semantic.get("capacity_mw")
 filtered_capacity_mw = None
 if capacity_col and capacity_col in filtered_df.columns:
     filtered_capacity_mw = float(pd.to_numeric(filtered_df[capacity_col], errors="coerce").sum(skipna=True))
-if official_under_study_mw is not None:
-    metric_cols[2].metric("ERCOT Under Study (MW)", f"{official_under_study_mw:,.0f}")
-elif filtered_capacity_mw is not None:
+if filtered_capacity_mw is not None:
     metric_cols[2].metric("Filtered Capacity (MW)", f"{filtered_capacity_mw:,.0f}")
 else:
     metric_cols[2].metric("Filtered Capacity (MW)", "n/a")
 
+if official_under_study_mw is not None:
+    metric_cols[3].metric("ERCOT Under Study (MW)", f"{official_under_study_mw:,.0f}")
+else:
+    metric_cols[3].metric("ERCOT Under Study (MW)", "n/a")
+
 pulled_at_text = current_meta.get("pulled_at_utc", "Unknown") if current_meta else "Unknown"
-metric_cols[3].metric("Last Pull (UTC)", _format_timestamp(pulled_at_text))
+metric_cols[4].metric("Last Pull (UTC)", _format_timestamp(pulled_at_text))
 
 if active_filters:
     st.caption("Active filters: " + ", ".join(active_filters))
