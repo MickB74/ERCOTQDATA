@@ -232,20 +232,7 @@ def _update_chart_filter(filter_key: str, values: list[str]) -> bool:
     else:
         chart_filters.pop(filter_key, None)
 
-    chart_to_sidebar_key = {
-        "fuel": "fuel",
-        "technology": "technology",
-        "developer": "developer",
-        "zone": "reporting_zone",
-    }
-    sidebar_key = chart_to_sidebar_key.get(filter_key)
-    if sidebar_key:
-        if merged_values:
-            st.session_state[f"all_{sidebar_key}"] = False
-            st.session_state[f"select_{sidebar_key}"] = merged_values
-        else:
-            st.session_state[f"all_{sidebar_key}"] = True
-            st.session_state.pop(f"select_{sidebar_key}", None)
+    _queue_sidebar_sync_from_chart(filter_key, merged_values)
     return True
 
 
@@ -318,11 +305,40 @@ def _apply_selection_highlight(
     return highlighted, "selection_state"
 
 
+def _queue_sidebar_sync_from_chart(chart_key: str, selected_values: list[str]) -> None:
+    chart_to_sidebar_key = {
+        "fuel": "fuel",
+        "technology": "technology",
+        "developer": "developer",
+        "zone": "reporting_zone",
+    }
+    sidebar_key = chart_to_sidebar_key.get(chart_key)
+    if not sidebar_key:
+        return
+
+    pending = st.session_state.setdefault("pending_sidebar_sync", {})
+    pending[sidebar_key] = list(selected_values)
+
+
+def _apply_pending_sidebar_sync() -> None:
+    pending = st.session_state.pop("pending_sidebar_sync", None)
+    if not isinstance(pending, dict):
+        return
+
+    for sidebar_key, selected in pending.items():
+        if selected:
+            st.session_state[f"all_{sidebar_key}"] = False
+            st.session_state[f"select_{sidebar_key}"] = list(selected)
+        else:
+            st.session_state[f"all_{sidebar_key}"] = True
+            st.session_state.pop(f"select_{sidebar_key}", None)
+
+
 def _clear_chart_and_synced_sidebar_filters() -> None:
     st.session_state["chart_filters"] = {}
+    pending = st.session_state.setdefault("pending_sidebar_sync", {})
     for sidebar_key in ("fuel", "technology", "developer", "reporting_zone"):
-        st.session_state[f"all_{sidebar_key}"] = True
-        st.session_state.pop(f"select_{sidebar_key}", None)
+        pending[sidebar_key] = []
 
 
 def _source_identity(source_url: str | None) -> str:
@@ -545,6 +561,7 @@ chart_filters: dict[str, list[str]] = st.session_state.setdefault("chart_filters
 # Status chart was removed; drop any stale status chart selection.
 if "status" in chart_filters:
     chart_filters.pop("status", None)
+_apply_pending_sidebar_sync()
 
 with st.sidebar:
     st.header("Filters")
