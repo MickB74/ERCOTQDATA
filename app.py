@@ -7,7 +7,7 @@ from datetime import datetime
 try:
     from ercot_queue.config import DEFAULT_DATA_PRODUCT_URLS, MAX_CHANGE_SAMPLE_ROWS
     from ercot_queue.diffing import calculate_diff
-    from ercot_queue.fetcher import fetch_latest_ercot_queue
+    from ercot_queue.fetcher import fetch_latest_ercot_queue, fetch_summary_under_study_mw
     from ercot_queue.processing import infer_semantic_columns, prepare_queue_dataframe
 except ImportError as exc:
     st.error(f"Critical Package Error: {exc}")
@@ -68,6 +68,11 @@ def _format_timestamp(raw_ts: str) -> str:
 @st.cache_data(ttl=60 * 30, show_spinner=False)
 def _cached_fetch_external_validation(url: str) -> tuple[pd.DataFrame, dict]:
     return fetch_interconnection_fyi_ercot(url)
+
+
+@st.cache_data(ttl=60 * 30, show_spinner=False)
+def _cached_fetch_under_study_capacity(source_url: str) -> float | None:
+    return fetch_summary_under_study_mw(source_url)
 
 
 def _map_code_to_name(value: object, crosswalk: dict[str, str]) -> str | None:
@@ -206,6 +211,13 @@ if current_df is None or current_df.empty:
 snapshot_df = current_df.copy()
 snapshot_semantic = infer_semantic_columns(snapshot_df)
 official_under_study_mw = _extract_under_study_capacity_mw(snapshot_df)
+if official_under_study_mw is None and current_meta:
+    source_url = current_meta.get("source_url")
+    if source_url:
+        try:
+            official_under_study_mw = _cached_fetch_under_study_capacity(str(source_url))
+        except Exception:
+            official_under_study_mw = None
 detail_project_capacity_mw = _extract_project_detail_capacity_mw(
     snapshot_df,
     snapshot_semantic.get("capacity_mw"),

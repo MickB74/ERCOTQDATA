@@ -12,6 +12,7 @@ from urllib.parse import urljoin, urlparse
 import pandas as pd
 import requests
 from bs4 import BeautifulSoup
+from openpyxl import load_workbook
 
 from ercot_queue.config import (
     DEFAULT_DATA_PRODUCT_URLS,
@@ -163,6 +164,18 @@ def discover_latest_report_url(index_url: str) -> str:
     return str(_select_best_candidate(candidates)["url"])
 
 
+def fetch_summary_under_study_mw(report_url: str) -> float | None:
+    """Fetch official 'Total Capacity Under Study' directly from the report workbook."""
+    _assert_ercot_url(report_url, "ERCOT report URL")
+    content, content_type, effective_url = _fetch_url(report_url)
+
+    workbook_bytes = _extract_workbook_bytes(content, effective_url, content_type)
+    if workbook_bytes is None:
+        return None
+
+    return _extract_under_study_from_workbook(workbook_bytes)
+
+
 def _fetch_url(url: str, timeout: int = REQUEST_TIMEOUT_SECONDS) -> tuple[bytes, str, str]:
     """Fetches URL content using curl first for ERCOT domains, or requests with fallback."""
     headers = {"User-Agent": "Mozilla/5.0"}
@@ -204,6 +217,107 @@ def _fetch_url(url: str, timeout: int = REQUEST_TIMEOUT_SECONDS) -> tuple[bytes,
                     f"Request failed via requests ({request_exc}) and curl fallback ({curl_exc})"
                 ) from request_exc
         raise request_exc
+
+
+def _extract_workbook_bytes(content: bytes, source_name: str, content_type: str) -> bytes | None:
+    source_lower = source_name.lower()
+    content_type_lower = (content_type or "").lower()
+
+    if source_lower.endswith(".xlsx") or "spreadsheetml" in content_type_lower:
+        return content
+
+    # openpyxl cannot open legacy .xls files.
+    if source_lower.endswith(".xls"):
+        return None
+
+    if source_lower.endswith(".zip") or "zip" in content_type_lower:
+        return _extract_workbook_from_zip(content)
+
+    # PK header can be either xlsx or zip. Try workbook first, then zip container.
+    if content[:2] == b"PK":
+        try:
+            load_workbook(io.BytesIO(content), data_only=True, read_only=True)
+            return content
+        except Exception:
+            return _extract_workbook_from_zip(content)
+
+    return None
+
+
+def _extract_workbook_from_zip(content: bytes) -> bytes | None:
+    try:
+        with zipfile.ZipFile(io.BytesIO(content)) as zf:
+            workbook_names = [
+                name for name in zf.namelist() if name.lower().endswith(".xlsx")
+            ]
+            if not workbook_names:
+                return None
+
+            workbook_names.sort(
+                key=lambda name: (
+                    0 if "gis" in name.lower() or "report" in name.lower() else 1,
+                    len(name),
+                )
+            )
+            with zf.open(workbook_names[0]) as file_handle:
+                return file_handle.read()
+    except Exception:
+        return None
+
+
+def _extract_under_study_from_workbook(workbook_bytes: bytes) -> float | None:
+    pattern = re.compile(r"total\s+capacity\s+under\s+study", flags=re.IGNORECASE)
+    candidates: list[float] = []
+
+    try:
+        workbook = load_workbook(io.BytesIO(workbook_bytes), data_only=True, read_only=True)
+    except Exception:
+        return None
+
+    sheet_names = list(workbook.sheetnames)
+    preferred = [name for name in sheet_names if "summary" in name.lower()]
+    ordered_sheet_names = preferred + [name for name in sheet_names if name not in preferred]
+
+    for sheet_name in ordered_sheet_names:
+        sheet = workbook[sheet_name]
+        for row in sheet.iter_rows(values_only=True):
+            if not row:
+                continue
+            if not any(pattern.search(str(value)) for value in row if isinstance(value, str)):
+                continue
+
+            for value in row:
+                numeric = _to_positive_float(value)
+                if numeric is not None:
+                    candidates.append(numeric)
+
+            if candidates and "summary" in sheet_name.lower():
+                workbook.close()
+                return max(candidates)
+
+    workbook.close()
+    return max(candidates) if candidates else None
+
+
+def _to_positive_float(value: Any) -> float | None:
+    if value is None:
+        return None
+
+    if isinstance(value, (int, float)):
+        numeric = float(value)
+        return numeric if numeric > 0 else None
+
+    if isinstance(value, str):
+        cleaned = re.sub(r"[^0-9.\-]", "", value)
+        if not cleaned:
+            return None
+        try:
+            numeric = float(cleaned)
+            return numeric if numeric > 0 else None
+        except ValueError:
+            return None
+
+    return None
 
 
 def _curl_fetch(url: str, user_agent: str, *, timeout: int, try_legacy_cipher: bool) -> bytes:
