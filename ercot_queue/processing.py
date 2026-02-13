@@ -46,7 +46,15 @@ def infer_semantic_columns(df: pd.DataFrame) -> dict[str, str | None]:
         "fuel": _match_first(columns, [r"fuel", r"technology", r"resource[_ ]type"]),
         "county": _match_first(columns, [r"county", r"location_county"]),
         "capacity_mw": _match_first(columns, [r"capacity.*mw", r"mw", r"size"]),
-        "cod_date": _match_first(columns, [r"commercial", r"operation", r"in_service", r"cod", r"date"]),
+        "cod_date": _match_first(
+            columns,
+            [
+                r"proposed.*completion",
+                r"commercial.*operation",
+                r"cod",
+                r"in.?service",
+            ],
+        ),
         "project_name": _match_first(columns, [r"project", r"name"]),
         "queue_id": _match_first(columns, [r"queue.*(id|number)", r"project.*id", r"^id$"]),
     }
