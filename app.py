@@ -608,30 +608,126 @@ def _render_operating_assets_view() -> None:
     status_col = semantic.get("status")
     fuel_col = semantic.get("fuel")
     zone_col = semantic.get("reporting_zone")
+    developer_col = semantic.get("developer")
     asset_name_col = semantic.get("project_name")
     capacity_col = semantic.get("capacity_mw")
+    in_service_year_col = _first_matching_column(
+        list(assets_df.columns),
+        [r"\bin_service_year\b", r"in.*service.*year"],
+    )
 
     if not capacity_col:
         capacity_col = _first_matching_column(list(assets_df.columns), [r"available.*mw", r"max.*mw", r"\bmw\b"])
     if not asset_name_col:
         asset_name_col = _first_matching_column(list(assets_df.columns), [r"resource.*name", r"unit.*name", r"\bname\b"])
+    if not developer_col:
+        developer_col = _first_matching_column(
+            list(assets_df.columns),
+            [r"developer", r"owner", r"company", r"entity"],
+        )
 
     filtered_assets = assets_df.copy()
     with st.sidebar:
         st.header("Operating Assets Filters")
+        search_text = st.text_input(
+            "Search Asset/Developer (Operating Assets)",
+            value=st.session_state.get("op_search_text", ""),
+            key="op_search_text",
+            help="Case-insensitive contains search across detected asset/developer columns.",
+        ).strip()
+        if search_text:
+            search_cols = [column for column in [asset_name_col, developer_col] if column and column in filtered_assets.columns]
+            if search_cols:
+                pattern = re.escape(search_text)
+                search_mask = pd.Series(False, index=filtered_assets.index)
+                for column in search_cols:
+                    search_mask = search_mask | filtered_assets[column].astype("string").str.contains(
+                        pattern,
+                        case=False,
+                        na=False,
+                    )
+                filtered_assets = filtered_assets[search_mask]
+
         for label, column in [
             ("Status", status_col),
             ("Fuel", fuel_col),
             ("Reporting Zone", zone_col),
+            ("Developer", developer_col),
         ]:
             if not column or column not in filtered_assets.columns:
                 continue
-            options = sorted({str(v) for v in filtered_assets[column].dropna().astype(str) if str(v).strip()})
+            normalized_series = filtered_assets[column].map(_normalize_filter_value)
+            options = sorted({str(v) for v in normalized_series if str(v).strip()})
             if not options:
                 continue
-            selected = st.multiselect(f"Select {label} (Operating Assets)", options=options, default=options, key=f"op_{label.lower().replace(' ', '_')}")
+            selected = st.multiselect(
+                f"Select {label} (Operating Assets)",
+                options=options,
+                default=options,
+                key=f"op_{label.lower().replace(' ', '_')}",
+            )
             if selected and set(selected) != set(options):
-                filtered_assets = filtered_assets[filtered_assets[column].astype(str).isin(selected)]
+                filtered_assets = filtered_assets[normalized_series.isin(selected)]
+
+        if capacity_col and capacity_col in filtered_assets.columns:
+            capacity_numeric = pd.to_numeric(filtered_assets[capacity_col], errors="coerce")
+            valid_capacity = capacity_numeric.dropna()
+            if not valid_capacity.empty:
+                min_capacity = float(valid_capacity.min())
+                max_capacity = float(valid_capacity.max())
+                capacity_range_key = "op_capacity_range"
+                existing_capacity_range = st.session_state.get(capacity_range_key, (min_capacity, max_capacity))
+                if (
+                    not isinstance(existing_capacity_range, (list, tuple))
+                    or len(existing_capacity_range) != 2
+                ):
+                    existing_capacity_range = (min_capacity, max_capacity)
+                lower_capacity = max(min_capacity, min(float(existing_capacity_range[0]), max_capacity))
+                upper_capacity = max(lower_capacity, min(float(existing_capacity_range[1]), max_capacity))
+                bounded_capacity_range = (lower_capacity, upper_capacity)
+                st.session_state[capacity_range_key] = bounded_capacity_range
+                selected_capacity = st.slider(
+                    "Capacity Range (MW) (Operating Assets)",
+                    min_value=min_capacity,
+                    max_value=max_capacity,
+                    value=bounded_capacity_range,
+                    key=capacity_range_key,
+                )
+                if selected_capacity != (min_capacity, max_capacity):
+                    filtered_assets = filtered_assets[
+                        capacity_numeric.between(selected_capacity[0], selected_capacity[1], inclusive="both")
+                    ]
+
+        if in_service_year_col and in_service_year_col in filtered_assets.columns:
+            year_numeric = pd.to_numeric(filtered_assets[in_service_year_col], errors="coerce")
+            valid_years = year_numeric.dropna().astype(int)
+            if not valid_years.empty:
+                min_year = int(valid_years.min())
+                max_year = int(valid_years.max())
+                year_range_key = "op_in_service_year_range"
+                existing_year_range = st.session_state.get(year_range_key, (min_year, max_year))
+                if (
+                    not isinstance(existing_year_range, (list, tuple))
+                    or len(existing_year_range) != 2
+                ):
+                    existing_year_range = (min_year, max_year)
+                lower_year = max(min_year, min(int(existing_year_range[0]), max_year))
+                upper_year = max(lower_year, min(int(existing_year_range[1]), max_year))
+                bounded_year_range = (lower_year, upper_year)
+                st.session_state[year_range_key] = bounded_year_range
+                selected_years = st.slider(
+                    "In-Service Year Range (Operating Assets)",
+                    min_value=min_year,
+                    max_value=max_year,
+                    value=bounded_year_range,
+                    key=year_range_key,
+                )
+                if selected_years != (min_year, max_year):
+                    filtered_assets = filtered_assets[
+                        year_numeric.between(selected_years[0], selected_years[1], inclusive="both")
+                    ]
+
+        st.caption(f"Filtered rows: {len(filtered_assets):,} / {len(assets_df):,}")
 
     operating_chart_filters: dict[str, list[str]] = st.session_state.setdefault("operating_chart_filters", {})
     if not fuel_col or fuel_col not in filtered_assets.columns:
@@ -974,7 +1070,7 @@ def _render_operating_assets_view() -> None:
 
     st.subheader("Operating Assets Table")
     display_columns: list[str] = []
-    for column in [asset_name_col, status_col, fuel_col, zone_col, capacity_col]:
+    for column in [asset_name_col, developer_col, status_col, fuel_col, zone_col, in_service_year_col, capacity_col]:
         if column and column in filtered_assets.columns and column not in display_columns:
             display_columns.append(column)
     for column in filtered_assets.columns:
