@@ -1283,26 +1283,38 @@ def _render_generation_fleet_view() -> None:
     else:
         chart_left.info("Technology/capacity columns not detected for MORA chart.")
 
-    if status_col and status_col in filtered_op.columns and capacity_col and capacity_col in filtered_op.columns:
-        status_plot = (
+    secondary_col = None
+    secondary_label = None
+    for candidate_col, candidate_label in [
+        (status_col, "Status"),
+        (zone_col, "Zone"),
+        (semantic.get("county"), "County"),
+    ]:
+        if candidate_col and candidate_col in filtered_op.columns:
+            secondary_col = candidate_col
+            secondary_label = candidate_label
+            break
+
+    if secondary_col and capacity_col and capacity_col in filtered_op.columns:
+        secondary_plot = (
             filtered_op.assign(_mw=pd.to_numeric(filtered_op[capacity_col], errors="coerce"))
-            .groupby(status_col, dropna=False)["_mw"]
+            .groupby(secondary_col, dropna=False)["_mw"]
             .sum(min_count=1)
             .reset_index()
             .sort_values("_mw", ascending=False)
             .head(15)
         )
-        status_fig = px.bar(
-            status_plot,
-            x=status_col,
+        secondary_fig = px.bar(
+            secondary_plot,
+            x=secondary_col,
             y="_mw",
-            title="MORA Capacity by Status (MW)",
-            labels={status_col: "Status", "_mw": "MW"},
+            title=f"MORA Capacity by {secondary_label} (MW)",
+            labels={secondary_col: secondary_label, "_mw": "MW"},
         )
-        _style_chart(status_fig)
-        chart_right.plotly_chart(status_fig, use_container_width=True)
+        _style_chart(secondary_fig)
+        chart_right.plotly_chart(secondary_fig, use_container_width=True)
     else:
-        chart_right.info("Status/capacity columns not detected for MORA chart.")
+        chart_right.info("No secondary grouping column detected for MORA chart.")
 
     display_cols: list[str] = []
     for column in [project_col, technology_col, fuel_col, status_col, zone_col, developer_col, cod_year_col, capacity_col]:
