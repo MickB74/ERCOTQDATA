@@ -19,6 +19,9 @@ Interactive Streamlit app to pull the ERCOT interconnection queue, explore it wi
 - Generation Fleet view with:
   - MORA fleet data from ERCOT Resource Details
   - In-app refresh controls for MORA fleet data
+- Building Interconnects view with:
+  - Candidate rows from ERCOT GIS snapshot text matches (data centers, offices, load/campus/company terms)
+  - In-app refresh controls and filtered candidate table/chart exports
 - Download filtered records as CSV
 - View snapshot history with per-refresh diff summary
 - Validate against an independent external source (Interconnection.fyi) with mismatch reports

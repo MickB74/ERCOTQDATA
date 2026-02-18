@@ -1387,7 +1387,7 @@ def _extract_named_large_load_candidates(snapshot_df: pd.DataFrame) -> pd.DataFr
         "vantage",
         "cyrusone",
     ]
-    generic_terms = ["data center", "datacenter", "office", "campus"]
+    generic_terms = ["data center", "datacenter", "office", "campus", "building", "warehouse", "facility"]
 
     rows: list[dict[str, Any]] = []
     for _, row in df.iterrows():
@@ -1667,6 +1667,250 @@ def _render_large_load_requests_view() -> None:
     )
 
 
+def _render_building_interconnect_view() -> None:
+    st.subheader("Building / Data Center Interconnect Requests")
+    st.caption(
+        "Detected from latest ERCOT GIS project details using project/entity text matches "
+        "(data center, office, campus, load, and tracked company names)."
+    )
+
+    with st.sidebar:
+        st.header("Building Candidate Source")
+        default_source_url = st.session_state.get(
+            "building_source_url",
+            DEFAULT_DATA_PRODUCT_URLS[0] if DEFAULT_DATA_PRODUCT_URLS else "",
+        )
+        building_source_url = st.text_input(
+            "ERCOT Source URL (Candidates)",
+            value=default_source_url,
+            help="ERCOT data-product-details URL or direct ERCOT GIS report URL.",
+            key="building_source_url_input",
+        ).strip()
+        st.session_state["building_source_url"] = building_source_url
+
+        if st.button("Refresh Candidate Data", type="primary", use_container_width=True):
+            with st.spinner("Checking ERCOT queue report for building/data-center candidate updates..."):
+                try:
+                    previous_df, previous_meta = load_latest_snapshot()
+                    previous_source_url = (previous_meta or {}).get("source_url")
+                    source_to_check = building_source_url or (
+                        DEFAULT_DATA_PRODUCT_URLS[0] if DEFAULT_DATA_PRODUCT_URLS else ""
+                    )
+
+                    expected_latest_url: str | None = None
+                    if source_to_check:
+                        try:
+                            expected_latest_url = _resolve_latest_source_url(source_to_check)
+                        except Exception:
+                            expected_latest_url = None
+
+                    already_current = (
+                        previous_meta is not None
+                        and expected_latest_url is not None
+                        and _source_identity(expected_latest_url) == _source_identity(previous_source_url)
+                    )
+
+                    if already_current:
+                        st.session_state["building_refresh_notice"] = (
+                            "Online ERCOT report matches local snapshot. No refresh needed."
+                        )
+                    else:
+                        latest_raw_df, source_meta = fetch_latest_ercot_queue(building_source_url or None)
+                        latest_prepared_df = prepare_queue_dataframe(latest_raw_df)
+                        diff_report = calculate_diff(
+                            previous_df,
+                            latest_prepared_df,
+                            max_sample_rows=MAX_CHANGE_SAMPLE_ROWS,
+                        )
+                        summary = diff_report.get("summary", {})
+                        unchanged = (
+                            previous_meta is not None
+                            and int(summary.get("added", 0)) == 0
+                            and int(summary.get("removed", 0)) == 0
+                            and int(summary.get("changed", 0)) == 0
+                        )
+
+                        if unchanged:
+                            st.session_state["building_refresh_notice"] = (
+                                "Candidate source data is unchanged. Local snapshot is current."
+                            )
+                        else:
+                            save_snapshot(
+                                latest_prepared_df,
+                                source_metadata=source_meta,
+                                diff_report=diff_report,
+                            )
+                            st.session_state["building_refresh_notice"] = (
+                                "Candidate refresh complete. "
+                                f"Added {summary.get('added', 0)}, "
+                                f"Removed {summary.get('removed', 0)}, "
+                                f"Changed {summary.get('changed', 0)}."
+                            )
+                    st.session_state["building_refreshed_at"] = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+                except Exception as exc:  # pylint: disable=broad-except
+                    st.session_state["building_refresh_notice"] = (
+                        "Candidate refresh failed. "
+                        f"Details: {exc}"
+                    )
+
+    refresh_notice = st.session_state.get("building_refresh_notice")
+    if refresh_notice:
+        if refresh_notice.startswith("Candidate refresh complete"):
+            st.success(refresh_notice)
+        else:
+            st.info(refresh_notice)
+
+    refreshed_at = st.session_state.get("building_refreshed_at")
+    if refreshed_at:
+        st.caption(f"Last candidate refresh check (UTC): {refreshed_at}")
+
+    snapshot_df, snapshot_meta = load_latest_snapshot()
+    if snapshot_df is None or snapshot_df.empty:
+        st.info("No GIS snapshot available. Click `Refresh Candidate Data` in the sidebar.")
+        return
+
+    named_df = _extract_named_large_load_candidates(snapshot_df)
+    if named_df.empty:
+        st.info(
+            "No building/data-center candidate rows were detected in the current snapshot. "
+            "Refresh data and try again if needed."
+        )
+        return
+
+    filtered_named = named_df.copy()
+    filter_cols = st.columns(4)
+
+    search_text = filter_cols[0].text_input(
+        "Search Project/Entity",
+        value=st.session_state.get("building_search_text", ""),
+        key="building_search_text",
+    ).strip()
+    if search_text:
+        pattern = re.escape(search_text)
+        project_text = filtered_named["project_name"].astype("string")
+        entity_text = filtered_named["interconnecting_entity"].astype("string")
+        filtered_named = filtered_named[
+            project_text.str.contains(pattern, case=False, na=False)
+            | entity_text.str.contains(pattern, case=False, na=False)
+        ]
+
+    for idx, (label, column, key) in enumerate(
+        [
+            ("Status", "status", "building_status_filter"),
+            ("Reporting Zone", "reporting_zone", "building_zone_filter"),
+            ("County", "county", "building_county_filter"),
+        ]
+    ):
+        if column not in filtered_named.columns:
+            continue
+        options = sorted(
+            {
+                str(value)
+                for value in filtered_named[column].map(_normalize_filter_value)
+                if str(value).strip()
+            }
+        )
+        if not options:
+            continue
+        selected = filter_cols[idx + 1].multiselect(label, options=options, default=options, key=key)
+        if selected and set(selected) != set(options):
+            filtered_named = filtered_named[filtered_named[column].map(_normalize_filter_value).isin(selected)]
+
+    if "capacity_mw" in filtered_named.columns:
+        cap_series = pd.to_numeric(filtered_named["capacity_mw"], errors="coerce")
+        valid = cap_series.dropna()
+        if not valid.empty:
+            min_cap = float(valid.min())
+            max_cap = float(valid.max())
+            key = "building_capacity_range"
+            current = st.session_state.get(key, (min_cap, max_cap))
+            if not isinstance(current, (list, tuple)) or len(current) != 2:
+                current = (min_cap, max_cap)
+            lower = max(min_cap, min(float(current[0]), max_cap))
+            upper = max(lower, min(float(current[1]), max_cap))
+            bounded = (lower, upper)
+            st.session_state[key] = bounded
+            selected_cap = st.slider(
+                "Capacity Range (MW) (Candidates)",
+                min_value=min_cap,
+                max_value=max_cap,
+                value=bounded,
+                key=key,
+            )
+            if selected_cap != (min_cap, max_cap):
+                filtered_named = filtered_named[cap_series.between(selected_cap[0], selected_cap[1], inclusive="both")]
+
+    metric_cols = st.columns(4)
+    metric_cols[0].metric("Candidates", f"{len(filtered_named):,}")
+    metric_cols[1].metric(
+        "Candidate MW",
+        f"{float(pd.to_numeric(filtered_named['capacity_mw'], errors='coerce').sum(skipna=True)):,.0f}",
+    )
+    metric_cols[2].metric(
+        "Snapshot ID",
+        str((snapshot_meta or {}).get("snapshot_id", "n/a")),
+    )
+    metric_cols[3].metric(
+        "Source",
+        str((snapshot_meta or {}).get("source", "n/a")),
+    )
+
+    chart_left, chart_right = st.columns(2)
+    if "interconnecting_entity" in filtered_named.columns:
+        entity_plot = (
+            filtered_named.assign(_mw=pd.to_numeric(filtered_named["capacity_mw"], errors="coerce"))
+            .groupby("interconnecting_entity", dropna=False)["_mw"]
+            .sum(min_count=1)
+            .reset_index()
+            .sort_values("_mw", ascending=False)
+            .head(15)
+        )
+        entity_fig = px.bar(
+            entity_plot,
+            x="interconnecting_entity",
+            y="_mw",
+            title="Top Candidate Entities by MW",
+            labels={"interconnecting_entity": "Entity", "_mw": "MW"},
+        )
+        _style_chart(entity_fig)
+        chart_left.plotly_chart(entity_fig, use_container_width=True)
+    else:
+        chart_left.info("Entity column not available for candidate chart.")
+
+    if "reporting_zone" in filtered_named.columns:
+        zone_plot = (
+            filtered_named.assign(_mw=pd.to_numeric(filtered_named["capacity_mw"], errors="coerce"))
+            .groupby("reporting_zone", dropna=False)["_mw"]
+            .sum(min_count=1)
+            .reset_index()
+            .sort_values("_mw", ascending=False)
+            .head(15)
+        )
+        zone_fig = px.bar(
+            zone_plot,
+            x="reporting_zone",
+            y="_mw",
+            title="Candidate MW by Reporting Zone",
+            labels={"reporting_zone": "Reporting Zone", "_mw": "MW"},
+        )
+        _style_chart(zone_fig)
+        chart_right.plotly_chart(zone_fig, use_container_width=True)
+    else:
+        chart_right.info("Reporting zone column not available for candidate chart.")
+
+    st.caption(
+        f"Candidate rows shown: {len(filtered_named):,} / {len(named_df):,} from snapshot "
+        f"{(snapshot_meta or {}).get('snapshot_id', 'n/a')}."
+    )
+    st.dataframe(filtered_named, use_container_width=True, height=420)
+    st.download_button(
+        label="Download Building/Data-Center Candidates (CSV)",
+        data=filtered_named.to_csv(index=False).encode("utf-8"),
+        file_name="ercot_building_data_center_candidates.csv",
+        mime="text/csv",
+    )
+
+
 st.set_page_config(
     page_title="ERCOT Interconnection Queue",
     layout="wide",
@@ -1697,13 +1941,17 @@ with st.sidebar:
     st.header("App Tab")
     app_view = st.radio(
         "Select View",
-        options=["Interconnection Queue", "Generation Fleet", "Large Load Requests"],
+        options=["Interconnection Queue", "Generation Fleet", "Building Interconnects", "Large Load Requests"],
         index=0,
         key="app_view",
     )
 
 if app_view == "Generation Fleet":
     _render_generation_fleet_view()
+    st.stop()
+
+if app_view == "Building Interconnects":
+    _render_building_interconnect_view()
     st.stop()
 
 if app_view == "Large Load Requests":
