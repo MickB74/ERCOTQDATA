@@ -796,10 +796,16 @@ def _render_operating_assets_view() -> None:
             official_operational = float(derived_operational)
             operational_capacity_source = "derived_rows"
 
-    if isinstance(official_operational, (int, float)):
-        metric_cols[0].metric("Operational Installed Capacity (MW)", f"{float(official_operational):,.0f}")
+    filtered_capacity_mw: float | None = None
+    if capacity_col and capacity_col in filtered_assets.columns:
+        filtered_capacity_series = pd.to_numeric(filtered_assets[capacity_col], errors="coerce")
+        if filtered_capacity_series.notna().any():
+            filtered_capacity_mw = float(filtered_capacity_series.sum(skipna=True))
+
+    if isinstance(filtered_capacity_mw, (int, float)):
+        metric_cols[0].metric("Filtered Capacity (MW)", f"{float(filtered_capacity_mw):,.0f}")
     else:
-        metric_cols[0].metric("Operational Installed Capacity (MW)", "n/a")
+        metric_cols[0].metric("Filtered Capacity (MW)", "n/a")
     metric_cols[1].metric("Operating Rows", f"{len(filtered_assets):,}")
     metric_cols[2].metric("Source Workbook", assets_meta.get("report_label", "latest"))
     if operating_chart_filters:
@@ -838,6 +844,7 @@ def _render_operating_assets_view() -> None:
                 st.caption(
                     "Summary total was unavailable in this workbook, so this value is derived from operating detail rows."
                 )
+        st.caption("Charts and table below are calculated from filtered Resource Details rows.")
 
     chart_col_1, chart_col_2 = st.columns(2)
     st.caption("Click chart items to toggle selection, or drag a box to select multiple bars.")
