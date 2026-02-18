@@ -8,6 +8,7 @@ DATA_DIR = BASE_DIR / "data"
 SNAPSHOT_DIR = DATA_DIR / "snapshots"
 CHANGE_DIR = DATA_DIR / "changes"
 METADATA_PATH = DATA_DIR / "metadata.json"
+CURRENT_SNAPSHOT_PATH = DATA_DIR / "current_snapshot.parquet"
 
 DEFAULT_DATA_PRODUCT_URLS = [
     "https://www.ercot.com/mp/data-products/data-product-details?id=pg7-200-er",

@@ -1402,8 +1402,8 @@ with st.sidebar:
 
             if already_current:
                 st.session_state["refresh_notice"] = (
-                    "No new ERCOT spreadsheet was found. "
-                    f"Using existing snapshot {previous_meta.get('snapshot_id', 'n/a')}."
+                    "Online ERCOT report matches the current local parquet snapshot. "
+                    f"Using snapshot {previous_meta.get('snapshot_id', 'n/a')}."
                 )
             else:
                 latest_raw_df, source_meta = fetch_latest_ercot_queue(custom_url or None)
@@ -1415,8 +1415,8 @@ with st.sidebar:
 
                 if same_file_after_fetch:
                     st.session_state["refresh_notice"] = (
-                        "No new ERCOT spreadsheet was found. "
-                        f"Using existing snapshot {previous_meta.get('snapshot_id', 'n/a')}."
+                        "Online ERCOT report matches the current local parquet snapshot. "
+                        f"Using snapshot {previous_meta.get('snapshot_id', 'n/a')}."
                     )
                 else:
                     latest_prepared_df = prepare_queue_dataframe(latest_raw_df)
@@ -1425,22 +1425,36 @@ with st.sidebar:
                         latest_prepared_df,
                         max_sample_rows=MAX_CHANGE_SAMPLE_ROWS,
                     )
-                    latest_meta = save_snapshot(
-                        latest_prepared_df,
-                        source_metadata=source_meta,
-                        diff_report=diff_report,
+                    summary = diff_report.get("summary", {})
+                    no_content_change = (
+                        previous_meta is not None
+                        and int(summary.get("added", 0)) == 0
+                        and int(summary.get("removed", 0)) == 0
+                        and int(summary.get("changed", 0)) == 0
                     )
 
-                    st.session_state["last_refresh"] = {
-                        "snapshot_id": latest_meta["snapshot_id"],
-                        "summary": diff_report.get("summary", {}),
-                    }
-                    st.session_state["refresh_notice"] = (
-                        "Refresh complete. "
-                        f"Added {diff_report['summary']['added']}, "
-                        f"Removed {diff_report['summary']['removed']}, "
-                        f"Changed {diff_report['summary']['changed']}."
-                    )
+                    if no_content_change:
+                        st.session_state["refresh_notice"] = (
+                            "Online ERCOT report is unchanged from the local parquet snapshot. "
+                            f"Using snapshot {previous_meta.get('snapshot_id', 'n/a')}."
+                        )
+                    else:
+                        latest_meta = save_snapshot(
+                            latest_prepared_df,
+                            source_metadata=source_meta,
+                            diff_report=diff_report,
+                        )
+
+                        st.session_state["last_refresh"] = {
+                            "snapshot_id": latest_meta["snapshot_id"],
+                            "summary": summary,
+                        }
+                        st.session_state["refresh_notice"] = (
+                            "Refresh complete. "
+                            f"Added {summary.get('added', 0)}, "
+                            f"Removed {summary.get('removed', 0)}, "
+                            f"Changed {summary.get('changed', 0)}."
+                        )
 
         notice = st.session_state.get("refresh_notice")
         if notice:
@@ -1452,8 +1466,32 @@ with st.sidebar:
 
 current_df, current_meta = load_latest_snapshot()
 if current_df is None or current_df.empty:
-    st.info("No snapshot yet. Click `Refresh Data` in the sidebar to pull the first dataset.")
-    st.stop()
+    auto_source = custom_url or default_source_url or None
+    with st.spinner("No local snapshot found. Pulling current ERCOT report..."):
+        try:
+            latest_raw_df, source_meta = fetch_latest_ercot_queue(auto_source)
+            latest_prepared_df = prepare_queue_dataframe(latest_raw_df)
+            initial_diff = calculate_diff(
+                None,
+                latest_prepared_df,
+                max_sample_rows=MAX_CHANGE_SAMPLE_ROWS,
+            )
+            current_meta = save_snapshot(
+                latest_prepared_df,
+                source_metadata=source_meta,
+                diff_report=initial_diff,
+            )
+            current_df = latest_prepared_df
+            st.session_state["refresh_notice"] = (
+                "Current ERCOT report was loaded and saved to local parquet snapshot storage."
+            )
+        except Exception as exc:
+            st.info(
+                "No local snapshot is available and an automatic pull failed. "
+                "Use `Refresh Data` in the sidebar to retry.\n\n"
+                f"Details: {exc}"
+            )
+            st.stop()
 
 snapshot_df = current_df.copy()
 snapshot_semantic = infer_semantic_columns(snapshot_df)

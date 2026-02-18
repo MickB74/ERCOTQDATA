@@ -5,11 +5,12 @@ Interactive Streamlit app to pull the ERCOT interconnection queue, explore it wi
 ## Features
 
 - Pull latest queue data from ERCOT sources (or from a custom ERCOT file URL)
-- Snapshot every refresh with UTC pull timestamp
+- Persist snapshots to parquet on every refresh with UTC pull timestamp
 - Detect and report row-level changes:
   - added projects
   - removed projects
   - changed field values
+- Skip refresh writes when the online ERCOT report matches the current local snapshot
 - Filter queue records by status, fuel/technology, county, capacity, and COD date range
 - Visualize queue data with charts:
   - capacity/projects by status
@@ -27,6 +28,7 @@ Interactive Streamlit app to pull the ERCOT interconnection queue, explore it wi
 - `ercot_queue/diffing.py`: refresh-to-refresh change detection
 - `ercot_queue/store.py`: local snapshot and metadata persistence
 - `data/snapshots/`: stored queue snapshots
+- `data/current_snapshot.parquet`: always-current local snapshot file
 - `data/changes/`: stored diff reports
 - `data/metadata.json`: snapshot index/history
 

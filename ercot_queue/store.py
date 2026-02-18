@@ -7,7 +7,7 @@ from typing import Any
 
 import pandas as pd
 
-from ercot_queue.config import CHANGE_DIR, DATA_DIR, METADATA_PATH, SNAPSHOT_DIR
+from ercot_queue.config import CHANGE_DIR, CURRENT_SNAPSHOT_PATH, DATA_DIR, METADATA_PATH, SNAPSHOT_DIR
 
 
 def ensure_data_dirs() -> None:
@@ -42,11 +42,12 @@ def save_snapshot(
     pulled_at = datetime.now(timezone.utc)
     snapshot_id = pulled_at.strftime("%Y%m%dT%H%M%SZ")
 
-    snapshot_path = SNAPSHOT_DIR / f"{snapshot_id}.csv"
+    snapshot_path = SNAPSHOT_DIR / f"{snapshot_id}.parquet"
     change_path = CHANGE_DIR / f"{snapshot_id}.json"
 
     serializable_df = _serialize_dataframe(df)
-    serializable_df.to_csv(snapshot_path, index=False)
+    _write_snapshot(serializable_df, snapshot_path)
+    _write_snapshot(serializable_df, CURRENT_SNAPSHOT_PATH)
 
     with change_path.open("w", encoding="utf-8") as file_handle:
         json.dump(diff_report, file_handle, indent=2)
@@ -56,6 +57,7 @@ def save_snapshot(
         "pulled_at_utc": pulled_at.isoformat(),
         "row_count": int(len(df)),
         "snapshot_path": str(snapshot_path),
+        "snapshot_format": "parquet",
         "change_path": str(change_path),
         "source": source_metadata.get("source", "unknown"),
         "source_url": source_metadata.get("source_url"),
@@ -79,17 +81,28 @@ def save_snapshot(
 def load_latest_snapshot() -> tuple[pd.DataFrame | None, dict[str, Any] | None]:
     metadata = load_metadata()
     snapshots = metadata.get("snapshots", [])
-    if not snapshots:
-        return None, None
+    if snapshots:
+        latest = snapshots[-1]
+        path = Path(latest["snapshot_path"])
+        if path.exists():
+            return _read_snapshot(path), latest
 
-    latest = snapshots[-1]
-    path = Path(latest["snapshot_path"])
-    if not path.exists():
+        if CURRENT_SNAPSHOT_PATH.exists():
+            fallback_meta = {**latest, "snapshot_path": str(CURRENT_SNAPSHOT_PATH), "snapshot_format": "parquet"}
+            return _read_snapshot(CURRENT_SNAPSHOT_PATH), fallback_meta
+
         return None, latest
 
-    df = pd.read_csv(path, low_memory=False)
-    df = _restore_dtypes(df)
-    return df, latest
+    if CURRENT_SNAPSHOT_PATH.exists():
+        inferred_meta = {
+            "snapshot_id": "current",
+            "snapshot_path": str(CURRENT_SNAPSHOT_PATH),
+            "snapshot_format": "parquet",
+            "source": "unknown",
+        }
+        return _read_snapshot(CURRENT_SNAPSHOT_PATH), inferred_meta
+
+    return None, None
 
 
 def load_change_report(snapshot_meta: dict[str, Any] | None) -> dict[str, Any] | None:
@@ -137,3 +150,19 @@ def _restore_dtypes(df: pd.DataFrame) -> pd.DataFrame:
                 df[column] = converted_num
 
     return df
+
+
+def _write_snapshot(df: pd.DataFrame, path: Path) -> None:
+    if path.suffix.lower() == ".csv":
+        df.to_csv(path, index=False)
+        return
+    df.to_parquet(path, index=False)
+
+
+def _read_snapshot(path: Path) -> pd.DataFrame:
+    if path.suffix.lower() == ".csv":
+        frame = pd.read_csv(path, low_memory=False)
+        return _restore_dtypes(frame)
+
+    frame = pd.read_parquet(path)
+    return _restore_dtypes(frame)

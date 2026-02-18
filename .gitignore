@@ -5,5 +5,7 @@ __pycache__/
 .DS_Store
 .streamlit/
 data/snapshots/*.csv
+data/snapshots/*.parquet
 data/changes/*.json
 data/metadata.json
+data/current_snapshot.parquet
