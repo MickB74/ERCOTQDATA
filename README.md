@@ -17,9 +17,8 @@ Interactive Streamlit app to pull the ERCOT interconnection queue, explore it wi
   - projects by fuel/technology
   - cumulative COD timeline
 - Generation Fleet view with:
-  - Operational fleet from ERCOT MORA Resource Details
-  - Queue fleet from ERCOT GIS snapshots
-  - In-app refresh controls for both operational and queue fleet data
+  - MORA fleet data from ERCOT Resource Details
+  - In-app refresh controls for MORA fleet data
 - Download filtered records as CSV
 - View snapshot history with per-refresh diff summary
 - Validate against an independent external source (Interconnection.fyi) with mismatch reports
