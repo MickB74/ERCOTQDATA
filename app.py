@@ -1221,7 +1221,7 @@ def _render_generation_fleet_view() -> None:
         else:
             st.info(queue_notice)
 
-    fleet_tab_op, fleet_tab_queue = st.tabs(["Operational Fleet", "Queue Fleet"])
+    fleet_tab_op, fleet_tab_queue = st.tabs(["MORA Operating Fleet", "Queue Fleet"])
 
     with fleet_tab_op:
         try:
@@ -1963,14 +1963,10 @@ with st.sidebar:
     st.header("App Tab")
     app_view = st.radio(
         "Select View",
-        options=["Interconnection Queue", "Operating Assets", "Generation Fleet", "Large Load Requests"],
+        options=["Interconnection Queue", "Generation Fleet", "Large Load Requests"],
         index=0,
         key="app_view",
     )
-
-if app_view == "Operating Assets":
-    _render_operating_assets_view()
-    st.stop()
 
 if app_view == "Generation Fleet":
     _render_generation_fleet_view()
