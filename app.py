@@ -1093,6 +1093,516 @@ def _render_operating_assets_view() -> None:
     )
 
 
+def _render_generation_fleet_view() -> None:
+    st.subheader("Generation Fleet")
+    st.caption(
+        "Operational fleet comes from ERCOT MORA Resource Details. "
+        "Queue fleet comes from the latest ERCOT GIS interconnection snapshot."
+    )
+
+    with st.sidebar:
+        st.header("Generation Fleet Sources")
+        operating_index_url = st.text_input(
+            "Operating Fleet URL",
+            value=st.session_state.get("generation_operating_index_url", DEFAULT_OPERATING_ASSETS_INDEX_URL),
+            help="ERCOT Resource Adequacy page used to discover the latest MORA workbook.",
+            key="generation_operating_index_url_input",
+        ).strip()
+        st.session_state["generation_operating_index_url"] = operating_index_url
+
+        default_queue_source = st.session_state.get(
+            "generation_queue_source_url",
+            DEFAULT_DATA_PRODUCT_URLS[0] if DEFAULT_DATA_PRODUCT_URLS else "",
+        )
+        queue_source_url = st.text_input(
+            "Queue Fleet URL",
+            value=default_queue_source,
+            help="ERCOT data-product URL or direct ERCOT GIS report URL.",
+            key="generation_queue_source_url_input",
+        ).strip()
+        st.session_state["generation_queue_source_url"] = queue_source_url
+
+        if st.button("Refresh Operational Fleet", use_container_width=True):
+            st.session_state["generation_operating_refreshed_at"] = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+            previous_source_url = str(st.session_state.get("generation_operating_source_url", ""))
+            try:
+                latest_workbook_url, _ = discover_latest_mora_workbook_url(operating_index_url)
+                if previous_source_url and (
+                    _source_identity(latest_workbook_url) == _source_identity(previous_source_url)
+                ):
+                    st.session_state["generation_operating_refresh_notice"] = (
+                        "No new generation fleet workbook found. Using current operational fleet data."
+                    )
+                else:
+                    _cached_fetch_operating_assets.clear()
+                    st.session_state["generation_operating_refresh_notice"] = "Operational fleet refresh complete."
+            except Exception as exc:  # pylint: disable=broad-except
+                st.session_state["generation_operating_refresh_notice"] = (
+                    "Could not check for a newer operational workbook. "
+                    f"Using current data. Details: {exc}"
+                )
+
+        if st.button("Refresh Queue Fleet", use_container_width=True):
+            with st.spinner("Checking ERCOT queue report for generation fleet updates..."):
+                try:
+                    previous_df, previous_meta = load_latest_snapshot()
+                    previous_source_url = (previous_meta or {}).get("source_url")
+                    source_to_check = queue_source_url or (
+                        DEFAULT_DATA_PRODUCT_URLS[0] if DEFAULT_DATA_PRODUCT_URLS else ""
+                    )
+
+                    expected_latest_url: str | None = None
+                    if source_to_check:
+                        try:
+                            expected_latest_url = _resolve_latest_source_url(source_to_check)
+                        except Exception:
+                            expected_latest_url = None
+
+                    already_current = (
+                        previous_meta is not None
+                        and expected_latest_url is not None
+                        and _source_identity(expected_latest_url) == _source_identity(previous_source_url)
+                    )
+
+                    if already_current:
+                        st.session_state["generation_queue_refresh_notice"] = (
+                            "Queue fleet source matches local snapshot. No refresh needed."
+                        )
+                    else:
+                        latest_raw_df, source_meta = fetch_latest_ercot_queue(queue_source_url or None)
+                        latest_prepared_df = prepare_queue_dataframe(latest_raw_df)
+                        diff_report = calculate_diff(
+                            previous_df,
+                            latest_prepared_df,
+                            max_sample_rows=MAX_CHANGE_SAMPLE_ROWS,
+                        )
+                        summary = diff_report.get("summary", {})
+                        unchanged = (
+                            previous_meta is not None
+                            and int(summary.get("added", 0)) == 0
+                            and int(summary.get("removed", 0)) == 0
+                            and int(summary.get("changed", 0)) == 0
+                        )
+
+                        if unchanged:
+                            st.session_state["generation_queue_refresh_notice"] = (
+                                "Queue fleet data is unchanged. Local snapshot is current."
+                            )
+                        else:
+                            save_snapshot(
+                                latest_prepared_df,
+                                source_metadata=source_meta,
+                                diff_report=diff_report,
+                            )
+                            st.session_state["generation_queue_refresh_notice"] = (
+                                "Queue fleet refresh complete. "
+                                f"Added {summary.get('added', 0)}, "
+                                f"Removed {summary.get('removed', 0)}, "
+                                f"Changed {summary.get('changed', 0)}."
+                            )
+                except Exception as exc:  # pylint: disable=broad-except
+                    st.session_state["generation_queue_refresh_notice"] = (
+                        "Queue fleet refresh failed. "
+                        f"Details: {exc}"
+                    )
+                st.session_state["generation_queue_refreshed_at"] = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+
+    operational_notice = st.session_state.get("generation_operating_refresh_notice")
+    if operational_notice:
+        if operational_notice.endswith("complete."):
+            st.success(operational_notice)
+        else:
+            st.info(operational_notice)
+
+    queue_notice = st.session_state.get("generation_queue_refresh_notice")
+    if queue_notice:
+        if queue_notice.startswith("Queue fleet refresh complete"):
+            st.success(queue_notice)
+        else:
+            st.info(queue_notice)
+
+    fleet_tab_op, fleet_tab_queue = st.tabs(["Operational Fleet", "Queue Fleet"])
+
+    with fleet_tab_op:
+        try:
+            operational_df, operational_meta = _cached_fetch_operating_assets(operating_index_url)
+        except Exception as exc:  # pylint: disable=broad-except
+            st.error(f"Could not load operational generation fleet from ERCOT: {exc}")
+            operational_df, operational_meta = pd.DataFrame(), {}
+
+        if operational_df.empty:
+            st.info("No operational generation fleet rows were returned.")
+        else:
+            st.session_state["generation_operating_source_url"] = str(operational_meta.get("source_url", ""))
+            operational_df = _prepare_operating_assets_dataframe(operational_df)
+            semantic = infer_semantic_columns(operational_df)
+            status_col = semantic.get("status")
+            fuel_col = semantic.get("fuel")
+            technology_col = semantic.get("technology")
+            zone_col = semantic.get("reporting_zone")
+            developer_col = semantic.get("developer")
+            project_col = semantic.get("project_name")
+            capacity_col = semantic.get("capacity_mw")
+            if not capacity_col:
+                capacity_col = _first_matching_column(
+                    list(operational_df.columns),
+                    [r"available.*mw", r"max.*mw", r"\bmw\b"],
+                )
+            cod_year_col = _first_matching_column(
+                list(operational_df.columns),
+                [r"\bin_service_year\b", r"cod.*year", r"in.*service.*year"],
+            )
+
+            filtered_op = operational_df.copy()
+            op_filter_cols = st.columns(3)
+            op_search = op_filter_cols[0].text_input(
+                "Search Project/Developer (Operational)",
+                value=st.session_state.get("gf_op_search", ""),
+                key="gf_op_search",
+            ).strip()
+            if op_search:
+                search_cols = [c for c in [project_col, developer_col] if c and c in filtered_op.columns]
+                if search_cols:
+                    pattern = re.escape(op_search)
+                    mask = pd.Series(False, index=filtered_op.index)
+                    for column in search_cols:
+                        mask = mask | filtered_op[column].astype("string").str.contains(pattern, case=False, na=False)
+                    filtered_op = filtered_op[mask]
+
+            for idx, (label, column, key) in enumerate(
+                [
+                    ("Technology", technology_col or fuel_col, "gf_op_technology"),
+                    ("Status", status_col, "gf_op_status"),
+                    ("Zone", zone_col, "gf_op_zone"),
+                    ("Developer", developer_col, "gf_op_developer"),
+                ]
+            ):
+                if not column or column not in filtered_op.columns:
+                    continue
+                options = sorted({str(v) for v in filtered_op[column].map(_normalize_filter_value) if str(v).strip()})
+                if not options:
+                    continue
+                selected = op_filter_cols[(idx + 1) % 3].multiselect(label, options, default=options, key=key)
+                if selected and set(selected) != set(options):
+                    filtered_op = filtered_op[filtered_op[column].map(_normalize_filter_value).isin(selected)]
+
+            if capacity_col and capacity_col in filtered_op.columns:
+                cap_series = pd.to_numeric(filtered_op[capacity_col], errors="coerce")
+                valid = cap_series.dropna()
+                if not valid.empty:
+                    min_cap = float(valid.min())
+                    max_cap = float(valid.max())
+                    key = "gf_op_capacity_range"
+                    current = st.session_state.get(key, (min_cap, max_cap))
+                    if not isinstance(current, (list, tuple)) or len(current) != 2:
+                        current = (min_cap, max_cap)
+                    lower = max(min_cap, min(float(current[0]), max_cap))
+                    upper = max(lower, min(float(current[1]), max_cap))
+                    bounded = (lower, upper)
+                    st.session_state[key] = bounded
+                    selected_cap = st.slider(
+                        "Capacity Range (MW) (Operational)",
+                        min_value=min_cap,
+                        max_value=max_cap,
+                        value=bounded,
+                        key=key,
+                    )
+                    if selected_cap != (min_cap, max_cap):
+                        filtered_op = filtered_op[cap_series.between(selected_cap[0], selected_cap[1], inclusive="both")]
+
+            if cod_year_col and cod_year_col in filtered_op.columns:
+                year_series = pd.to_numeric(filtered_op[cod_year_col], errors="coerce")
+                years = year_series.dropna().astype(int)
+                if not years.empty:
+                    min_year = int(years.min())
+                    max_year = int(years.max())
+                    key = "gf_op_year_range"
+                    current = st.session_state.get(key, (min_year, max_year))
+                    if not isinstance(current, (list, tuple)) or len(current) != 2:
+                        current = (min_year, max_year)
+                    lower = max(min_year, min(int(current[0]), max_year))
+                    upper = max(lower, min(int(current[1]), max_year))
+                    bounded = (lower, upper)
+                    st.session_state[key] = bounded
+                    selected_year = st.slider(
+                        "COD/In-Service Year Range (Operational)",
+                        min_value=min_year,
+                        max_value=max_year,
+                        value=bounded,
+                        key=key,
+                    )
+                    if selected_year != (min_year, max_year):
+                        filtered_op = filtered_op[
+                            year_series.between(selected_year[0], selected_year[1], inclusive="both")
+                        ]
+
+            op_metric_cols = st.columns(3)
+            op_capacity = None
+            if capacity_col and capacity_col in filtered_op.columns:
+                op_capacity_series = pd.to_numeric(filtered_op[capacity_col], errors="coerce")
+                if op_capacity_series.notna().any():
+                    op_capacity = float(op_capacity_series.sum(skipna=True))
+
+            op_metric_cols[0].metric("Operational Capacity (MW)", f"{op_capacity:,.0f}" if op_capacity is not None else "n/a")
+            op_metric_cols[1].metric("Operational Projects", f"{len(filtered_op):,}")
+            avg_size = (op_capacity / len(filtered_op)) if (op_capacity is not None and len(filtered_op)) else None
+            op_metric_cols[2].metric("Average Size (MW)", f"{avg_size:,.0f}" if avg_size is not None else "n/a")
+
+            chart_left, chart_right = st.columns(2)
+            tech_col = technology_col or fuel_col
+            if tech_col and tech_col in filtered_op.columns and capacity_col and capacity_col in filtered_op.columns:
+                tech_plot = (
+                    filtered_op.assign(_mw=pd.to_numeric(filtered_op[capacity_col], errors="coerce"))
+                    .groupby(tech_col, dropna=False)["_mw"]
+                    .sum(min_count=1)
+                    .reset_index()
+                    .sort_values("_mw", ascending=False)
+                    .head(15)
+                )
+                tech_fig = px.bar(
+                    tech_plot,
+                    x=tech_col,
+                    y="_mw",
+                    title="Operational Capacity by Technology (MW)",
+                    labels={tech_col: "Technology", "_mw": "MW"},
+                )
+                _style_chart(tech_fig)
+                chart_left.plotly_chart(tech_fig, use_container_width=True)
+            else:
+                chart_left.info("Technology/capacity columns not detected for operational chart.")
+
+            if status_col and status_col in filtered_op.columns and capacity_col and capacity_col in filtered_op.columns:
+                status_plot = (
+                    filtered_op.assign(_mw=pd.to_numeric(filtered_op[capacity_col], errors="coerce"))
+                    .groupby(status_col, dropna=False)["_mw"]
+                    .sum(min_count=1)
+                    .reset_index()
+                    .sort_values("_mw", ascending=False)
+                    .head(15)
+                )
+                status_fig = px.bar(
+                    status_plot,
+                    x=status_col,
+                    y="_mw",
+                    title="Operational Capacity by Status (MW)",
+                    labels={status_col: "Status", "_mw": "MW"},
+                )
+                _style_chart(status_fig)
+                chart_right.plotly_chart(status_fig, use_container_width=True)
+            else:
+                chart_right.info("Status/capacity columns not detected for operational chart.")
+
+            display_cols: list[str] = []
+            for column in [project_col, technology_col, fuel_col, status_col, zone_col, developer_col, cod_year_col, capacity_col]:
+                if column and column in filtered_op.columns and column not in display_cols:
+                    display_cols.append(column)
+            for column in filtered_op.columns:
+                if column not in display_cols:
+                    display_cols.append(column)
+
+            st.caption(
+                f"Operational rows shown: {len(filtered_op):,} / {len(operational_df):,} | "
+                f"Source workbook: {operational_meta.get('report_label', 'latest')}"
+            )
+            st.dataframe(filtered_op[display_cols], use_container_width=True, height=460)
+            st.download_button(
+                "Download Operational Fleet (CSV)",
+                data=filtered_op.to_csv(index=False).encode("utf-8"),
+                file_name="ercot_generation_fleet_operational.csv",
+                mime="text/csv",
+            )
+
+    with fleet_tab_queue:
+        queue_df, queue_meta = load_latest_snapshot()
+        if queue_df is None or queue_df.empty:
+            st.info("No queue snapshot is available yet. Click `Refresh Queue Fleet` in the sidebar.")
+        else:
+            queue_df = queue_df.copy()
+            if "source_sheet" in queue_df.columns:
+                detail_mask = queue_df["source_sheet"].astype("string").str.contains(
+                    "project details - large gen|project details - small gen",
+                    case=False,
+                    na=False,
+                    regex=True,
+                )
+                if detail_mask.any():
+                    queue_df = queue_df[detail_mask].copy()
+
+            semantic = infer_semantic_columns(queue_df)
+            status_col = semantic.get("status")
+            fuel_col = semantic.get("fuel")
+            technology_col = semantic.get("technology")
+            zone_col = semantic.get("reporting_zone")
+            developer_col = semantic.get("developer")
+            project_col = semantic.get("project_name")
+            capacity_col = semantic.get("capacity_mw")
+            cod_col = semantic.get("cod_date")
+
+            filtered_queue = queue_df.copy()
+            queue_filter_cols = st.columns(3)
+            queue_search = queue_filter_cols[0].text_input(
+                "Search Project/Developer (Queue)",
+                value=st.session_state.get("gf_queue_search", ""),
+                key="gf_queue_search",
+            ).strip()
+            if queue_search:
+                search_cols = [c for c in [project_col, developer_col] if c and c in filtered_queue.columns]
+                if search_cols:
+                    pattern = re.escape(queue_search)
+                    mask = pd.Series(False, index=filtered_queue.index)
+                    for column in search_cols:
+                        mask = mask | filtered_queue[column].astype("string").str.contains(pattern, case=False, na=False)
+                    filtered_queue = filtered_queue[mask]
+
+            for idx, (label, column, key) in enumerate(
+                [
+                    ("Technology", technology_col or fuel_col, "gf_queue_technology"),
+                    ("Status", status_col, "gf_queue_status"),
+                    ("Zone", zone_col, "gf_queue_zone"),
+                    ("Developer", developer_col, "gf_queue_developer"),
+                ]
+            ):
+                if not column or column not in filtered_queue.columns:
+                    continue
+                options = sorted({str(v) for v in filtered_queue[column].map(_normalize_filter_value) if str(v).strip()})
+                if not options:
+                    continue
+                selected = queue_filter_cols[(idx + 1) % 3].multiselect(label, options, default=options, key=key)
+                if selected and set(selected) != set(options):
+                    filtered_queue = filtered_queue[filtered_queue[column].map(_normalize_filter_value).isin(selected)]
+
+            if capacity_col and capacity_col in filtered_queue.columns:
+                cap_series = pd.to_numeric(filtered_queue[capacity_col], errors="coerce")
+                valid = cap_series.dropna()
+                if not valid.empty:
+                    min_cap = float(valid.min())
+                    max_cap = float(valid.max())
+                    key = "gf_queue_capacity_range"
+                    current = st.session_state.get(key, (min_cap, max_cap))
+                    if not isinstance(current, (list, tuple)) or len(current) != 2:
+                        current = (min_cap, max_cap)
+                    lower = max(min_cap, min(float(current[0]), max_cap))
+                    upper = max(lower, min(float(current[1]), max_cap))
+                    bounded = (lower, upper)
+                    st.session_state[key] = bounded
+                    selected_cap = st.slider(
+                        "Capacity Range (MW) (Queue)",
+                        min_value=min_cap,
+                        max_value=max_cap,
+                        value=bounded,
+                        key=key,
+                    )
+                    if selected_cap != (min_cap, max_cap):
+                        filtered_queue = filtered_queue[
+                            cap_series.between(selected_cap[0], selected_cap[1], inclusive="both")
+                        ]
+
+            if cod_col and cod_col in filtered_queue.columns:
+                cod_values = pd.to_datetime(filtered_queue[cod_col], errors="coerce")
+                cod_years = cod_values.dt.year.dropna().astype(int)
+                if not cod_years.empty:
+                    min_year = int(cod_years.min())
+                    max_year = int(cod_years.max())
+                    key = "gf_queue_cod_year_range"
+                    current = st.session_state.get(key, (min_year, max_year))
+                    if not isinstance(current, (list, tuple)) or len(current) != 2:
+                        current = (min_year, max_year)
+                    lower = max(min_year, min(int(current[0]), max_year))
+                    upper = max(lower, min(int(current[1]), max_year))
+                    bounded = (lower, upper)
+                    st.session_state[key] = bounded
+                    selected_year = st.slider(
+                        "Projected COD Year Range (Queue)",
+                        min_value=min_year,
+                        max_value=max_year,
+                        value=bounded,
+                        key=key,
+                    )
+                    if selected_year != (min_year, max_year):
+                        filtered_queue = filtered_queue[
+                            cod_values.dt.year.between(selected_year[0], selected_year[1], inclusive="both")
+                        ]
+
+            queue_metric_cols = st.columns(3)
+            queue_capacity = None
+            if capacity_col and capacity_col in filtered_queue.columns:
+                queue_capacity_series = pd.to_numeric(filtered_queue[capacity_col], errors="coerce")
+                if queue_capacity_series.notna().any():
+                    queue_capacity = float(queue_capacity_series.sum(skipna=True))
+
+            queue_metric_cols[0].metric("Queue Capacity (MW)", f"{queue_capacity:,.0f}" if queue_capacity is not None else "n/a")
+            queue_metric_cols[1].metric("Queue Projects", f"{len(filtered_queue):,}")
+            avg_queue_size = (queue_capacity / len(filtered_queue)) if (queue_capacity is not None and len(filtered_queue)) else None
+            queue_metric_cols[2].metric("Average Size (MW)", f"{avg_queue_size:,.0f}" if avg_queue_size is not None else "n/a")
+
+            queue_chart_left, queue_chart_right = st.columns(2)
+            tech_col = technology_col or fuel_col
+            if tech_col and tech_col in filtered_queue.columns and capacity_col and capacity_col in filtered_queue.columns:
+                tech_plot = (
+                    filtered_queue.assign(_mw=pd.to_numeric(filtered_queue[capacity_col], errors="coerce"))
+                    .groupby(tech_col, dropna=False)["_mw"]
+                    .sum(min_count=1)
+                    .reset_index()
+                    .sort_values("_mw", ascending=False)
+                    .head(15)
+                )
+                tech_fig = px.bar(
+                    tech_plot,
+                    x=tech_col,
+                    y="_mw",
+                    title="Queue Capacity by Technology (MW)",
+                    labels={tech_col: "Technology", "_mw": "MW"},
+                )
+                _style_chart(tech_fig)
+                queue_chart_left.plotly_chart(tech_fig, use_container_width=True)
+            else:
+                queue_chart_left.info("Technology/capacity columns not detected for queue chart.")
+
+            if status_col and status_col in filtered_queue.columns and capacity_col and capacity_col in filtered_queue.columns:
+                status_plot = (
+                    filtered_queue.assign(_mw=pd.to_numeric(filtered_queue[capacity_col], errors="coerce"))
+                    .groupby(status_col, dropna=False)["_mw"]
+                    .sum(min_count=1)
+                    .reset_index()
+                    .sort_values("_mw", ascending=False)
+                    .head(15)
+                )
+                status_fig = px.bar(
+                    status_plot,
+                    x=status_col,
+                    y="_mw",
+                    title="Queue Capacity by Status (MW)",
+                    labels={status_col: "Status", "_mw": "MW"},
+                )
+                _style_chart(status_fig)
+                queue_chart_right.plotly_chart(status_fig, use_container_width=True)
+            else:
+                queue_chart_right.info("Status/capacity columns not detected for queue chart.")
+
+            display_cols: list[str] = []
+            for column in [project_col, technology_col, fuel_col, status_col, zone_col, developer_col, cod_col, capacity_col]:
+                if column and column in filtered_queue.columns and column not in display_cols:
+                    display_cols.append(column)
+            for column in filtered_queue.columns:
+                if column not in display_cols:
+                    display_cols.append(column)
+
+            st.caption(
+                f"Queue rows shown: {len(filtered_queue):,} / {len(queue_df):,} | "
+                f"Snapshot: {(queue_meta or {}).get('snapshot_id', 'n/a')}"
+            )
+            source_url = (queue_meta or {}).get("source_url")
+            if source_url:
+                st.caption(f"Queue source URL: {source_url}")
+            st.dataframe(filtered_queue[display_cols], use_container_width=True, height=460)
+            st.download_button(
+                "Download Queue Fleet (CSV)",
+                data=filtered_queue.to_csv(index=False).encode("utf-8"),
+                file_name="ercot_generation_fleet_queue.csv",
+                mime="text/csv",
+            )
+
+
 def _extract_named_large_load_candidates(snapshot_df: pd.DataFrame) -> pd.DataFrame:
     if snapshot_df is None or snapshot_df.empty:
         return pd.DataFrame()
@@ -1453,13 +1963,17 @@ with st.sidebar:
     st.header("App Tab")
     app_view = st.radio(
         "Select View",
-        options=["Interconnection Queue", "Operating Assets", "Large Load Requests"],
+        options=["Interconnection Queue", "Operating Assets", "Generation Fleet", "Large Load Requests"],
         index=0,
         key="app_view",
     )
 
 if app_view == "Operating Assets":
     _render_operating_assets_view()
+    st.stop()
+
+if app_view == "Generation Fleet":
+    _render_generation_fleet_view()
     st.stop()
 
 if app_view == "Large Load Requests":
