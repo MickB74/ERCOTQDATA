@@ -230,13 +230,20 @@ def _normalize_column_name(column: Any) -> str:
 def _dedupe_column_names(df: pd.DataFrame) -> pd.DataFrame:
     seen: dict[str, int] = {}
     deduped: list[str] = []
+    all_names: set[str] = set(df.columns)
 
     for column in df.columns:
         count = seen.get(column, 0)
         if count == 0:
             deduped.append(column)
         else:
-            deduped.append(f"{column}_{count}")
+            # Find a suffix that doesn't clash with any existing column name
+            candidate = f"{column}_{count}"
+            while candidate in all_names:
+                count += 1
+                candidate = f"{column}_{count}"
+            deduped.append(candidate)
+            all_names.add(candidate)
         seen[column] = count + 1
 
     df.columns = deduped
@@ -318,11 +325,12 @@ def _remap_storage_fuel(df: pd.DataFrame) -> pd.DataFrame:
         combined_text = " ".join(str(row.get(col, "")) for col in check_cols)
         return bool(re.search(storage_pattern, combined_text))
 
-    # Only apply to rows where fuel is 'Other'
-    df.loc[mask_other, "is_storage_detected"] = df[mask_other].apply(_is_storage, axis=1)
-    df.loc[df["is_storage_detected"] == True, fuel_col] = "Battery / Storage"
+    # Use a collision-safe temp column name
+    _tmp_col = "__is_storage_detected__"
+    df.loc[mask_other, _tmp_col] = df[mask_other].apply(_is_storage, axis=1)
+    df.loc[df[_tmp_col].eq(True), fuel_col] = "Battery / Storage"
 
-    return df.drop(columns=["is_storage_detected"], errors="ignore")
+    return df.drop(columns=[_tmp_col], errors="ignore")
 
 
 def _to_key_string(value: Any) -> str:

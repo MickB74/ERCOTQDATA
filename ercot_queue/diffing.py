@@ -31,8 +31,8 @@ def calculate_diff(
     prev = _ensure_unique_keys(previous_df)
     curr = _ensure_unique_keys(current_df)
 
-    previous_keys = set(prev["record_key"]) if "record_key" in prev.columns else set()
-    current_keys = set(curr["record_key"]) if "record_key" in curr.columns else set()
+    previous_keys = set(prev["record_key"])
+    current_keys = set(curr["record_key"])
 
     added_keys = sorted(current_keys - previous_keys)
     removed_keys = sorted(previous_keys - current_keys)
@@ -112,10 +112,13 @@ def _rows_for_keys(df: pd.DataFrame, keys: Iterable[str], limit: int) -> list[di
 def _normalize_value(value: Any) -> str:
     if value is None:
         return ""
+    try:
+        if pd.isna(value):
+            return ""
+    except (TypeError, ValueError):
+        pass
     if isinstance(value, pd.Timestamp):
         return value.isoformat()
-    if pd.isna(value):
-        return ""
     return str(value).strip()
 
 

@@ -19,5 +19,17 @@ DEFAULT_REPORT_INDEX_URLS = [
     "http://www.ercot.com/misapp/GetReports.do?reportTypeId=15933&reportTitle=Generation%20Interconnection%20Status%20Report&showHTMLView=&mimicKey",
 ]
 
-REQUEST_TIMEOUT_SECONDS = int(os.getenv("ERCOT_REQUEST_TIMEOUT", "60"))
-MAX_CHANGE_SAMPLE_ROWS = int(os.getenv("ERCOT_MAX_CHANGE_SAMPLE_ROWS", "500"))
+def _parse_int_env(name: str, default: int) -> int:
+    raw = os.getenv(name, "")
+    if not raw:
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        import warnings
+        warnings.warn(f"Invalid value for {name}={raw!r}; using default {default}", stacklevel=2)
+        return default
+
+
+REQUEST_TIMEOUT_SECONDS = _parse_int_env("ERCOT_REQUEST_TIMEOUT", 60)
+MAX_CHANGE_SAMPLE_ROWS = _parse_int_env("ERCOT_MAX_CHANGE_SAMPLE_ROWS", 500)
