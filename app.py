@@ -1273,12 +1273,14 @@ def _render_generation_fleet_view() -> None:
         )
         tech_fig = px.bar(
             tech_plot,
-            x=tech_col,
-            y="_mw",
+            x="_mw",
+            y=tech_col,
+            orientation="h",
             title="MORA Capacity by Technology (MW)",
             labels={tech_col: "Technology", "_mw": "MW"},
         )
-        _style_chart(tech_fig)
+        tech_fig.update_layout(yaxis={"categoryorder": "total ascending"})
+        _style_chart(tech_fig, x_tick_angle=0)
         chart_left.plotly_chart(tech_fig, use_container_width=True)
     else:
         chart_left.info("Technology/capacity columns not detected for MORA chart.")
@@ -1306,12 +1308,14 @@ def _render_generation_fleet_view() -> None:
         )
         secondary_fig = px.bar(
             secondary_plot,
-            x=secondary_col,
-            y="_mw",
+            x="_mw",
+            y=secondary_col,
+            orientation="h",
             title=f"MORA Capacity by {secondary_label} (MW)",
             labels={secondary_col: secondary_label, "_mw": "MW"},
         )
-        _style_chart(secondary_fig)
+        secondary_fig.update_layout(yaxis={"categoryorder": "total ascending"})
+        _style_chart(secondary_fig, x_tick_angle=0)
         chart_right.plotly_chart(secondary_fig, use_container_width=True)
     else:
         chart_right.info("No secondary grouping column detected for MORA chart.")
