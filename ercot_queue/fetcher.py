@@ -654,7 +654,7 @@ def _fetch_url(url: str, timeout: int = REQUEST_TIMEOUT_SECONDS) -> tuple[bytes,
             headers=headers,
             timeout=timeout,
             allow_redirects=True,
-            verify=False,
+            verify=not is_ercot,  # ERCOT has known SSL handshake issues; non-ERCOT URLs verify normally
         )
         response.raise_for_status()
         content_type = response.headers.get("content-type", "").lower()
@@ -679,9 +679,10 @@ def _extract_workbook_bytes(content: bytes, source_name: str, content_type: str)
     if source_lower.endswith(".xlsx") or "spreadsheetml" in content_type_lower:
         return content
 
-    # openpyxl cannot open legacy .xls files.
+    # openpyxl cannot open legacy .xls files, but pandas can via xlrd.
+    # Return the raw bytes and let _read_excel_with_fallbacks handle it.
     if source_lower.endswith(".xls"):
-        return None
+        return content
 
     if source_lower.endswith(".zip") or "zip" in content_type_lower:
         return _extract_workbook_from_zip(content)
@@ -976,16 +977,22 @@ def _download_table(url: str, depth: int = 0) -> pd.DataFrame:
 
 def _read_zip_table(content: bytes) -> pd.DataFrame:
     with zipfile.ZipFile(io.BytesIO(content)) as zf:
-        names = sorted(zf.namelist())
-        # print(f"DEBUG ZIP CONTENT: {names}")
-        for name in names:
-            name_lower = name.lower()
-            if not any(name_lower.endswith(ext) for ext in (".csv", ".xls", ".xlsx")):
-                continue
-            with zf.open(name) as file_handle:
-                return _read_table_bytes(file_handle.read(), name, "")
+        names = [
+            name for name in zf.namelist()
+            if any(name.lower().endswith(ext) for ext in (".csv", ".xls", ".xlsx"))
+        ]
+        if not names:
+            raise RuntimeError("ZIP file did not contain CSV/XLS/XLSX data")
 
-    raise RuntimeError("ZIP file did not contain CSV/XLS/XLSX data")
+        # Prefer GIS/report files; fall back to alphabetical order
+        names.sort(
+            key=lambda name: (
+                0 if ("gis" in name.lower() or "report" in name.lower()) else 1,
+                len(name),
+            )
+        )
+        with zf.open(names[0]) as file_handle:
+            return _read_table_bytes(file_handle.read(), names[0], "")
 
 
 def _read_table_bytes(content: bytes, source_name: str, content_type: str) -> pd.DataFrame:

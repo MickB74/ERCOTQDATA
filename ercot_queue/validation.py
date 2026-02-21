@@ -173,19 +173,18 @@ def _parse_from_next_data(html: str) -> pd.DataFrame:
 
     candidate_lists: list[list[dict[str, Any]]] = []
 
-    def _walk(node: Any) -> None:
+    # Iterative traversal to avoid hitting Python's recursion limit on deep JSON trees
+    stack: list[Any] = [payload]
+    while stack:
+        node = stack.pop()
         if isinstance(node, list):
             if node and all(isinstance(item, dict) for item in node):
                 score = sum(1 for item in node if _looks_like_project_dict(item))
                 if score >= max(3, int(0.4 * len(node))):
                     candidate_lists.append(node)
-            for item in node:
-                _walk(item)
+            stack.extend(node)
         elif isinstance(node, dict):
-            for value in node.values():
-                _walk(value)
-
-    _walk(payload)
+            stack.extend(node.values())
 
     if not candidate_lists:
         return pd.DataFrame()

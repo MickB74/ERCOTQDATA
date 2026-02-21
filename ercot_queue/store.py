@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import os
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -8,6 +10,24 @@ from typing import Any
 import pandas as pd
 
 from ercot_queue.config import CHANGE_DIR, CURRENT_SNAPSHOT_PATH, DATA_DIR, METADATA_PATH, SNAPSHOT_DIR
+
+
+@contextmanager
+def _metadata_lock():
+    """Advisory file lock around metadata reads/writes to prevent concurrent corruption."""
+    lock_path = METADATA_PATH.with_suffix(".lock")
+    lock_fd = None
+    try:
+        lock_fd = os.open(str(lock_path), os.O_CREAT | os.O_WRONLY)
+        # Blocking exclusive lock; releases automatically when fd is closed.
+        import fcntl
+        fcntl.flock(lock_fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        if lock_fd is not None:
+            import fcntl
+            fcntl.flock(lock_fd, fcntl.LOCK_UN)
+            os.close(lock_fd)
 
 
 def ensure_data_dirs() -> None:
@@ -69,11 +89,12 @@ def save_snapshot(
         "diff_summary": diff_report.get("summary", {}),
     }
 
-    metadata = load_metadata()
-    snapshots = metadata.setdefault("snapshots", [])
-    snapshots.append(entry)
-    snapshots.sort(key=lambda item: item["snapshot_id"])
-    save_metadata(metadata)
+    with _metadata_lock():
+        metadata = load_metadata()
+        snapshots = metadata.setdefault("snapshots", [])
+        snapshots.append(entry)
+        snapshots.sort(key=lambda item: item["snapshot_id"])
+        save_metadata(metadata)
 
     return entry
 
