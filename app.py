@@ -1360,9 +1360,16 @@ def _extract_named_large_load_candidates(snapshot_df: pd.DataFrame) -> pd.DataFr
 
     if source_sheet_col:
         source_text = df[source_sheet_col].astype("string").str.lower()
-        detail_mask = source_text.str.contains("project details - large gen|project details - small gen", na=False)
+        gen_mask = source_text.str.contains("project details - large gen|project details - small gen", na=False)
+        load_mask = source_text.str.contains(
+            r"project details.*load|large load|load.*project", na=False, regex=True
+        )
+        detail_mask = gen_mask | load_mask
         if detail_mask.any():
             df = df[detail_mask].copy()
+        df["_is_load_sheet"] = load_mask.reindex(df.index, fill_value=False)
+    else:
+        df["_is_load_sheet"] = False
 
     df[capacity_col] = pd.to_numeric(df[capacity_col], errors="coerce")
     df = df[df[capacity_col].fillna(0) > 0].copy()
@@ -1380,14 +1387,57 @@ def _extract_named_large_load_candidates(snapshot_df: pd.DataFrame) -> pd.DataFr
         "apple",
         "xai",
         "openai",
+        "nvidia",
+        "tesla",
+        "intel",
+        "ibm",
         "digital realty",
         "equinix",
         "qts",
         "switch",
         "vantage",
         "cyrusone",
+        "iron mountain",
+        "coresite",
+        "flexential",
     ]
-    generic_terms = ["data center", "datacenter", "office", "campus", "building", "warehouse", "facility"]
+    generic_terms = [
+        "data center",
+        "datacenter",
+        "office",
+        "campus",
+        "building",
+        "warehouse",
+        "facility",
+        "hospital",
+        "medical",
+        "health",
+        "clinic",
+        "industrial",
+        "manufacturing",
+        "factory",
+        "plant",
+        "refinery",
+        "chemical",
+        "semiconductor",
+        "fab",
+        "university",
+        "college",
+        "school",
+        "hotel",
+        "resort",
+        "retail",
+        "mall",
+        "stadium",
+        "arena",
+        "airport",
+        "port",
+        "mine",
+        "mining",
+        "military",
+        "municipal",
+        "government",
+    ]
 
     rows: list[dict[str, Any]] = []
     for _, row in df.iterrows():
@@ -1399,6 +1449,10 @@ def _extract_named_large_load_candidates(snapshot_df: pd.DataFrame) -> pd.DataFr
         developer_lower = developer_text.lower()
         poi_lower = poi_text.lower()
         reasons: list[str] = []
+
+        # Rows from an explicit load sheet are included by definition
+        if row.get("_is_load_sheet"):
+            reasons.append("load sheet")
 
         for term in company_terms:
             if term in project_lower or term in developer_lower:
