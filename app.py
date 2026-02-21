@@ -1350,6 +1350,7 @@ def _extract_named_large_load_candidates(snapshot_df: pd.DataFrame) -> pd.DataFr
     zone_col = semantic.get("reporting_zone")
     county_col = semantic.get("county")
     queue_id_col = semantic.get("queue_id")
+    fuel_col = semantic.get("fuel") or semantic.get("technology")
     source_sheet_col = "source_sheet" if "source_sheet" in df.columns else None
     poi_col = "poi_location" if "poi_location" in df.columns else None
 
@@ -1471,6 +1472,7 @@ def _extract_named_large_load_candidates(snapshot_df: pd.DataFrame) -> pd.DataFr
                 "queue_id": row.get(queue_id_col) if queue_id_col else None,
                 "project_name": row.get(project_col),
                 "interconnecting_entity": row.get(developer_col) if developer_col else None,
+                "fuel_type": row.get(fuel_col) if fuel_col else None,
                 "status": row.get(status_col) if status_col else None,
                 "reporting_zone": row.get(zone_col) if zone_col else None,
                 "county": row.get(county_col) if county_col else None,
@@ -1831,6 +1833,36 @@ def _render_building_interconnect_view() -> None:
         )
         return
 
+    # By default, hide rows whose fuel type is clearly a generation-only technology.
+    # The GIS report only tracks generators, so solar/wind/gas rows that slip through
+    # keyword matching are not actual load interconnects.
+    _GENERATION_FUEL_PATTERN = re.compile(
+        r"\b(solar|wind|gas|nuclear|hydro|coal|biomass|geothermal|diesel|"
+        r"natural.?gas|photovoltaic|\bpv\b|lng|fuel.?cell|steam|combustion|"
+        r"landfill|thermal|cogeneration|cogen|combined.?cycle)\b",
+        flags=re.IGNORECASE,
+    )
+    hide_gen = st.checkbox(
+        "Hide pure generation projects (solar, wind, gas, nuclear, etc.)",
+        value=True,
+        key="building_hide_gen_fuels",
+        help=(
+            "The ERCOT GIS report covers generation interconnects only. "
+            "Enabling this hides rows where Fuel Type indicates a generator rather than a load facility."
+        ),
+    )
+    if hide_gen and "fuel_type" in named_df.columns:
+        fuel_series = named_df["fuel_type"].astype("string").fillna("")
+        gen_mask = fuel_series.apply(lambda v: bool(_GENERATION_FUEL_PATTERN.search(v)))
+        named_df = named_df[~gen_mask].copy()
+
+    if named_df.empty:
+        st.info(
+            "All keyword-matched rows had generation-type fuel types. "
+            "Try unchecking 'Hide pure generation projects' above, or refresh data."
+        )
+        return
+
     filtered_named = named_df.copy()
     filter_cols = st.columns(4)
 
@@ -1953,8 +1985,8 @@ def _render_building_interconnect_view() -> None:
         chart_right.info("Reporting zone column not available for candidate chart.")
 
     st.caption(
-        f"Candidate rows shown: {len(filtered_named):,} / {len(named_df):,} from snapshot "
-        f"{(snapshot_meta or {}).get('snapshot_id', 'n/a')}."
+        f"Rows shown: {len(filtered_named):,} / {len(named_df):,} candidates "
+        f"(after fuel-type filter) from snapshot {(snapshot_meta or {}).get('snapshot_id', 'n/a')}."
     )
     st.dataframe(filtered_named, use_container_width=True, height=420)
     st.download_button(
